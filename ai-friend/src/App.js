@@ -589,7 +589,7 @@ export default function App() {
   const [avatarPrompt, setAvatarPrompt] = useState('');
   const [outfit,       setOutfit]       = useState('');
   const [personality,  setPersonality]  = useState('friendly');
-  const [avatarSrc,    setAvatarSrc]    = useState(`${API_BASE}/media/avatar.png`);
+  const [avatarSrc,    setAvatarSrc]    = useState(`${API_BASE}/media/avatar.png?t=${Date.now()}`);
 
   // loading per action
   const [loadingAvatar,      setLoadingAvatar]      = useState(false);
@@ -649,7 +649,8 @@ export default function App() {
     setLoadingAvatar(true);
     try {
       const res = await api.post('/setavatar', { prompt: avatarPrompt });
-      setAvatarSrc(`${res.data.avatar}?t=${Date.now()}`);
+      const imageUrl = res.data.avatar ? res.data.avatar : `${API_BASE}/media/avatar.png`;
+      setAvatarSrc(`${imageUrl}?t=${Date.now()}`);
       showInfo('Avatar updated ✨');
       setSidebarOpen(false);
     } catch { showError('Failed to create avatar.'); }
@@ -662,7 +663,8 @@ export default function App() {
     setLoadingOutfit(true);
     try {
       const res = await api.post('/changeoutfit', { outfit });
-      addMessage('ai', res.data.reply, res.data.image);
+      const imageUrl = res.data.image ? `${res.data.image}?t=${Date.now()}` : null;
+      addMessage('ai', res.data.reply, imageUrl);
       setSidebarOpen(false);
     } catch { showError('Failed to change outfit.'); }
     finally  { setLoadingOutfit(false); }
@@ -697,7 +699,8 @@ export default function App() {
       const res = await api.post('/chat', { message: text });
       setIsTyping(false);
       setIsGenImg(false);
-      addMessage('ai', res.data.reply, res.data.image ?? null);
+      const imageUrl = res.data.image ? `${res.data.image}?t=${Date.now()}` : null;
+      addMessage('ai', res.data.reply, imageUrl);
     } catch {
       setIsTyping(false);
       setIsGenImg(false);

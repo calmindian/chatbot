@@ -10,6 +10,7 @@ from functools import partial
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from diffusers import StableDiffusionPipeline, AutoencoderKL
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 ROOT         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL     = os.getenv("BASE_URL",   "http://127.0.0.1:8000")
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-MODEL_NAME   = os.getenv("MODEL_NAME", "llama3:latest")
+MODEL_NAME   = os.getenv("MODEL_NAME", "llama2-uncensored:latest")
 SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/realistic")))
 VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
 MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
@@ -151,14 +152,14 @@ async def generate_image(prompt: str, steps: int = 35) -> str:
 
 def build_realistic_prompt(base: str, extra: str = "") -> str:
     """
-    Full-body prompt — 1080p camera photo taken by another person.
-    Not a selfie, not a studio shoot. Natural outdoor/indoor light.
+    Full-body photorealistic prompt.
+    Pose and direction come entirely from base/extra — never hardcoded here.
+    Only framing (full body) and quality keywords are enforced globally.
     """
     suffix = (
-        # framing
+        # framing — full body always, NO forced pose or direction
         "full body shot, full length, head to toe, entire body visible, "
-        "standing pose, looking at camera, "
-        # photo feel — photo taken by another person, not a selfie
+        # photo feel
         "photo taken by friend, 1080p photograph, HD photo, "
         "natural light, realistic everyday background, "
         # realism
@@ -238,6 +239,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── No-cache middleware for media files ────────────────────
+@app.middleware("http")
+async def add_no_cache_header(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/media"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 app.mount("/media", StaticFiles(directory=MEDIA_FOLDER), name="media")
 
 # ---------------- ROUTES ----------------
@@ -262,7 +273,7 @@ async def chat(data: ChatRequest):
 
     image_keywords = ["image", "picture", "photo", "pic", "selfie", "show me", "draw"]
     if any(kw in user_message.lower() for kw in image_keywords):
-        prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, full body, natural relaxed pose")
+        prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {user_message}")
         rel_path = await generate_image(prompt)
         return {"reply": "Here is a picture of me ❤️", "image": f"{BASE_URL}/{rel_path}"}
 
@@ -293,7 +304,7 @@ async def set_avatar(data: AvatarRequest):
 
     prompt   = build_realistic_prompt(
         avatar_prompt,
-        f"wearing {outfit if outfit else 'casual clothes'}, full body, natural relaxed pose, plain white background"
+        f"wearing {outfit if outfit else 'casual clothes'}, plain white background"
     )
     rel_path = await generate_image(prompt)
     shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
@@ -310,7 +321,7 @@ async def change_outfit(data: OutfitRequest):
 
     prompt   = build_realistic_prompt(
         avatar_prompt,
-        f"wearing {outfit}, full body, showing complete outfit from head to toe, fashion photography pose, plain background"
+        f"wearing {outfit}, plain background"
     )
     rel_path = await generate_image(prompt)
     return {"reply": f"Outfit changed to {outfit}! 👗", "image": f"{BASE_URL}/{rel_path}"}

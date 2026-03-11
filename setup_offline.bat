@@ -36,11 +36,11 @@ echo.
 ::             noVAE edition REQUIRES external VAE for proper faces
 ::  VAE      : stabilityai/sd-vae-ft-mse  (~335 MB)
 ::             fixes blurry/distorted faces -- biggest face quality fix
-::  LLM      : llama3:latest
-::             must use full tag -- plain "llama3" causes 500 errors
+::  LLM      : llama2-uncensored:latest
+::             must use full tag -- plain "llama2-uncensored:latest" causes 500 errors
 :: ─────────────────────────────────────────────────────────────
 
-set OLLAMA_MODEL=llama3:latest
+set OLLAMA_MODEL=llama2-uncensored:latest
 set SD_MODEL_ID=SG161222/Realistic_Vision_V6.0_B1_noVAE
 set SD_MODEL_PATH=models\realistic
 set VAE_MODEL_ID=stabilityai/sd-vae-ft-mse
@@ -202,8 +202,8 @@ if errorlevel 1 (
 
 :: ─────────────────────────────────────────────
 :: Step 10 -- Ollama check
-::            Uses full tag "llama3:latest" --
-::            plain "llama3" causes 500 errors
+::            Uses full tag "llama2-uncensored:latest" --
+::            plain "llama2-uncensored:latest" causes 500 errors
 ::            because Ollama stores it with the tag.
 :: ─────────────────────────────────────────────
 echo.
@@ -295,7 +295,7 @@ echo [Step 13] Writing backend\.env...
 (
     echo BASE_URL=http://127.0.0.1:8000
     echo OLLAMA_URL=http://localhost:11434/api/generate
-    echo MODEL_NAME=llama3:latest
+    echo MODEL_NAME=llama2-uncensored:latest
     echo SD_PATH=models/realistic
     echo VAE_PATH=models/vae
 ) > backend\.env
@@ -354,7 +354,7 @@ echo    fastapi          0.111.0  /  uvicorn 0.29.0
 echo    pydantic         2.7.1
 echo.
 echo  Models downloaded:
-echo    LLM : llama3:latest          (Ollama)
+echo    LLM : llama2-uncensored:latest          (Ollama)
 echo    SD  : Realistic Vision V6    (models\realistic\)
 echo    VAE : sd-vae-ft-mse          (models\vae\)
 echo.
