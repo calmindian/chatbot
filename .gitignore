@@ -1,0 +1,77 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environment ────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Environment / secrets ──────────────────────────────────────
+# Keep .env.example but never commit real .env files
+backend/.env
+ai-friend/.env
+.env
+.env.*
+!.env.example
+
+# ── AI Models (large binary files — download via setup_offline.bat) ───
+models/
+# If you ever want to track model metadata but not weights:
+# !models/**/config.json
+# !models/**/model_index.json
+
+# ── Generated media (images & audio created at runtime) ───────
+media/images/
+media/audio/
+# Keep the placeholder avatar so the UI doesn't break on first load
+!media/avatar.png
+
+# ── Chat history (personal / runtime data) ────────────────────
+chat_history.json
+
+# ── Node / React ───────────────────────────────────────────────
+ai-friend/node_modules/
+ai-friend/build/
+ai-friend/.pnp
+ai-friend/.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── IDE / Editor ───────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.code-workspace
+
+# ── OS files ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ── Pytest / coverage ──────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Jupyter ────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Logs ───────────────────────────────────────────────────────
+*.log
+logs/
