@@ -5,6 +5,7 @@ import torch
 import json
 import asyncio
 import shutil
+import imageio
 from PIL import Image
 from functools import partial
 from fastapi import FastAPI, HTTPException
@@ -26,9 +27,11 @@ SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models
 VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
 MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
 IMAGE_FOLDER = os.path.normpath(os.path.join(ROOT, "media", "images"))
+GIF_FOLDER   = os.path.normpath(os.path.join(ROOT, "media", "gifs"))
 MAX_HISTORY  = 20
 
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
+os.makedirs(GIF_FOLDER, exist_ok=True)
 
 # ---------------- LOAD MODELS ----------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -135,16 +138,14 @@ def _run_sd(prompt: str, steps: int = 35):
             num_inference_steps=steps,
             guidance_scale=7.0,
             clip_skip=2,
-            width=512,
-            height=768,   # portrait ratio — gives room for full body head to toe
+            width=600,
+            height=800,   # portrait ratio — gives room for full body head to toe
         ).images[0]
 
 async def generate_image(prompt: str, steps: int = 35) -> str:
     """Offload SD to a thread so FastAPI event loop stays free."""
     loop = asyncio.get_running_loop()
     img  = await loop.run_in_executor(None, partial(_run_sd, prompt, steps))
-    # Upscale to 1080p portrait (1080×1620) using Lanczos — sharpest resampling filter
-    img  = img.resize((1080, 1620), resample=Image.LANCZOS)
     path = os.path.join(IMAGE_FOLDER, f"{uuid.uuid4()}.png")
     img.save(path)
     rel  = os.path.relpath(path, ROOT).replace("\\", "/")
@@ -160,7 +161,7 @@ def build_realistic_prompt(base: str, extra: str = "") -> str:
         # framing — full body always, NO forced pose or direction
         "full body shot, full length, head to toe, entire body visible, "
         # photo feel
-        "photo taken by friend, 1080p photograph, HD photo, "
+        "photo taken by friend, HD photograph, HD photo, "
         "natural light, realistic everyday background, "
         # realism
         "photorealistic, hyperrealistic, RAW photo, "
@@ -175,6 +176,59 @@ def build_realistic_prompt(base: str, extra: str = "") -> str:
     parts = [p for p in [base, extra, suffix] if p]
     return ", ".join(parts)
 
+async def generate_gif(prompt: str) -> str:
+    """Generate smooth GIF with consistent scene and subtle motion variations."""
+    loop = asyncio.get_running_loop()
+
+    def _run_gif():
+        """Generate GIF by adding small perturbations to a single base latent."""
+        frames = []
+
+        with torch.inference_mode():
+            # Generate one base latent to keep scene consistent
+            base_generator = torch.Generator(device=device).manual_seed(42)
+            base_latent = torch.randn(
+                (1, 4, 64, 64),  # SD latent shape
+                generator=base_generator,
+                device=device,
+                dtype=dtype,
+            )
+
+            # Generate frames with tiny perturbations to the base latent
+            # This keeps the scene, pose, and face consistent while adding subtle motion
+            num_frames = 10
+            perturbation_scale = 0.08  # Small noise = subtle variations only
+
+            for frame_idx in range(num_frames):
+                # Add very small Gaussian noise to base latent
+                perturbation = torch.randn_like(base_latent) * perturbation_scale
+                latent = base_latent + perturbation
+
+                # Decode the perturbed latent into an image
+                img = sd(
+                    prompt=prompt,
+                    negative_prompt=NEGATIVE_PROMPT,
+                    num_inference_steps=25,
+                    guidance_scale=7.0,
+                    clip_skip=2,
+                    width=512,
+                    height=512,
+                    latents=latent,
+                ).images[0]
+
+                frames.append(img)
+
+        # Save as GIF
+        filename = f"{uuid.uuid4()}.gif"
+        out_path = os.path.join(GIF_FOLDER, filename)
+
+        imageio.mimsave(out_path, frames, duration=0.15, loop=0)  # 6.7 fps
+
+        return f"media/gifs/{filename}"
+
+    rel_path = await loop.run_in_executor(None, _run_gif)
+    return rel_path
+
 # ---------------- OLLAMA ----------------
 def _ollama_sync(prompt: str) -> str:
     """Synchronous Ollama call — always run via executor, never call directly in async code."""
@@ -187,7 +241,7 @@ def _ollama_sync(prompt: str) -> str:
                 "stream": False,
                 "options": {
                     "temperature":  0.7,
-                    "num_predict":  60,   # was 80 — shorter = faster, still full sentences
+                    "num_predict":  150,   # was 80 — shorter = faster, still full sentences
                     "num_ctx":      512,  # context window — 512 is plenty for chat; default 4096 is slow
                     "top_k":        20,   # focus sampling — faster inference
                     "top_p":        0.9,
@@ -271,8 +325,21 @@ async def chat(data: ChatRequest):
     if not user_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
+    gif_keywords = ["gif", "animate", "dancing", "walking", "moving", "motion", "video", "action"]
+    if any(kw in user_message.lower() for kw in gif_keywords):
+        if not avatar_prompt:
+            return {"reply": "Please create an avatar first! Use the settings panel.", "gif": None}
+        try:
+            prompt = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {user_message}")
+            rel_path = await generate_gif(prompt)
+            return {"reply": "Here is an animated GIF of me! 🎬", "gif": f"{BASE_URL}/{rel_path}"}
+        except Exception as e:
+            return {"reply": f"Sorry, GIF generation failed: {str(e)}", "gif": None}
+
     image_keywords = ["image", "picture", "photo", "pic", "selfie", "show me", "draw"]
     if any(kw in user_message.lower() for kw in image_keywords):
+        if not avatar_prompt:
+            return {"reply": "Please create an avatar first! Use the settings panel.", "image": None}
         prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {user_message}")
         rel_path = await generate_image(prompt)
         return {"reply": "Here is a picture of me ❤️", "image": f"{BASE_URL}/{rel_path}"}

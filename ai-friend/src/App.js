@@ -580,6 +580,11 @@ function isImageRequest(msg) {
     .some(k => msg.toLowerCase().includes(k));
 }
 
+function isGifRequest(msg) {
+  return ['gif','animate','dancing','walking','moving','motion','video','action']
+    .some(k => msg.toLowerCase().includes(k));
+}
+
 // ── COMPONENT ─────────────────────────────────────────────────────────────────
 export default function App() {
   // sidebar
@@ -602,6 +607,7 @@ export default function App() {
   const [message,   setMessage]   = useState('');
   const [isTyping,  setIsTyping]  = useState(false);
   const [isGenImg,  setIsGenImg]  = useState(false);
+  const [isGenGif,  setIsGenGif]  = useState(false);
 
   // lightbox
   const [lightbox, setLightbox] = useState(null);
@@ -612,13 +618,18 @@ export default function App() {
   // server status
   const [isServerOnline, setIsServerOnline] = useState(false);
 
+  // voice (Web Speech API — fully offline, no backend needed)
+  const [voices,       setVoices]       = useState([]);
+  const [currentVoice, setCurrentVoice] = useState(null); // SpeechSynthesisVoice object
+  const [ttsEnabled,   setTtsEnabled]   = useState(true);
+
   const chatEndRef  = useRef(null);
   const inputRef    = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping, isGenImg]);
+  }, [messages, isTyping, isGenImg, isGenGif]);
 
   // Check server connectivity on mount and periodically
   useEffect(() => {
@@ -636,11 +647,39 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Load browser voices (Web Speech API)
+  useEffect(() => {
+    const load = () => {
+      const all = window.speechSynthesis.getVoices();
+      const en  = all.filter(v => v.lang.startsWith('en'));
+      if (en.length === 0) return; // not ready yet
+      setVoices(en);
+      // Default: first Microsoft Online voice, else first English voice
+      const preferred = en.find(v => v.name.includes('Microsoft') && v.name.includes('Online'))
+                     || en.find(v => v.name.includes('Microsoft'))
+                     || en[0];
+      setCurrentVoice(preferred);
+    };
+    load();
+    window.speechSynthesis.onvoiceschanged = load; // fires when voices finish loading
+  }, []);
+
   const showError = (msg) => setSnack({ open: true, msg, severity: 'error' });
   const showInfo  = (msg) => setSnack({ open: true, msg, severity: 'success' });
 
-  const addMessage = (role, text, image = null) => {
-    setMessages(prev => [...prev, { role, text, image, time: new Date() }]);
+  const speakText = (text) => {
+    if (!ttsEnabled || !text) return;
+    window.speechSynthesis.cancel(); // stop any current speech
+    const utt = new SpeechSynthesisUtterance(text);
+    if (currentVoice) utt.voice = currentVoice;
+    utt.rate   = 1.0;
+    utt.pitch  = 1.0;
+    utt.volume = 1.0;
+    window.speechSynthesis.speak(utt);
+  };
+
+  const addMessage = (role, text, image = null, gif = null) => {
+    setMessages(prev => [...prev, { role, text, image, gif, time: new Date() }]);
   };
 
   // ── Avatar ─────────────────────────────────────────────────
@@ -691,19 +730,25 @@ export default function App() {
     setMessage('');
     setLoadingChat(true);
 
+    const willGenGif = isGifRequest(text);
     const willGenImage = isImageRequest(text);
-    if (willGenImage) setIsGenImg(true);
+    if (willGenGif)   setIsGenGif(true);
+    else if (willGenImage) setIsGenImg(true);
     else              setIsTyping(true);
 
     try {
       const res = await api.post('/chat', { message: text });
       setIsTyping(false);
       setIsGenImg(false);
+      setIsGenGif(false);
       const imageUrl = res.data.image ? `${res.data.image}?t=${Date.now()}` : null;
-      addMessage('ai', res.data.reply, imageUrl);
+      const gifUrl = res.data.gif ? `${res.data.gif}?t=${Date.now()}` : null;
+      addMessage('ai', res.data.reply, imageUrl, gifUrl);
+      speakText(res.data.reply);
     } catch {
       setIsTyping(false);
       setIsGenImg(false);
+      setIsGenGif(false);
       showError('Failed to get a reply. Is the server running?');
     } finally {
       setLoadingChat(false);
@@ -840,6 +885,38 @@ export default function App() {
               </button>
             </div>
 
+            {/* Voice section */}
+            <div className="panel-section">
+              <div className="panel-label" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                <span>🔊 Voice</span>
+                <button onClick={() => { setTtsEnabled(e => !e); window.speechSynthesis.cancel(); }}
+                  style={{background:'none',border:'none',color: ttsEnabled ? 'var(--accent)' : 'var(--text-secondary)',
+                    cursor:'pointer',fontSize:12,fontWeight:600}}>
+                  {ttsEnabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              <select className="wa-input" value={currentVoice?.name || ''}
+                onChange={e => {
+                  const v = voices.find(x => x.name === e.target.value);
+                  if (v) setCurrentVoice(v);
+                }}
+                style={{cursor:'pointer'}}
+                disabled={!ttsEnabled}
+              >
+                {voices.map(v => (
+                  <option key={v.name} value={v.name}>
+                    {v.name.replace('Microsoft ', '').replace(' Online (Natural) - English', '')}
+                  </option>
+                ))}
+              </select>
+              {currentVoice && (
+                <button className="wa-btn secondary" style={{marginTop:6}}
+                  onClick={() => speakText('Hello! This is how I sound.')}>
+                  ▶ Test Voice
+                </button>
+              )}
+            </div>
+
             {/* Tips */}
             <div className="panel-section" style={{fontSize:12, color:'var(--text-secondary)', lineHeight:1.6}}>
               <div className="panel-label">💡 Tips</div>
@@ -867,8 +944,9 @@ export default function App() {
             />
             <div className="chat-header-info">
               <div className="chat-header-name">AI Friend</div>
-              <div className={`chat-header-status ${(isTyping||isGenImg) ? 'typing' : ''}`}>
-                {isGenImg  ? '🎨 Generating image…'
+              <div className={`chat-header-status ${(isTyping||isGenImg||isGenGif) ? 'typing' : ''}`}>
+                {isGenGif  ? '🎬 Generating GIF…'
+                 : isGenImg  ? '🎨 Generating image…'
                  : isTyping ? 'typing…'
                  : 'tap to see profile & settings'}
               </div>
@@ -878,7 +956,7 @@ export default function App() {
           {/* Messages */}
           <div className="wa-messages">
 
-            {messages.length === 0 && !isTyping && !isGenImg && (
+            {messages.length === 0 && !isTyping && !isGenImg && !isGenGif && (
               <div className="empty-chat">
                 <div className="empty-icon">
                   <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor">
@@ -904,6 +982,15 @@ export default function App() {
                   <div className={`msg-row ${isUser ? 'user' : 'ai'}`}>
                     <div className="msg-bubble">
                       {msg.text}
+                      {msg.gif && (
+                        <img
+                          className="msg-image"
+                          src={msg.gif}
+                          alt="animated GIF"
+                          onClick={() => setLightbox(msg.gif)}
+                          style={{cursor: 'pointer'}}
+                        />
+                      )}
                       {msg.image && (
                         <img
                           className="msg-image"
@@ -936,6 +1023,14 @@ export default function App() {
               <div className="gen-bubble">
                 <CircularProgress size={16} style={{color:'var(--accent)'}} />
                 Generating image — this takes ~30 sec…
+              </div>
+            )}
+
+            {/* GIF generation indicator */}
+            {isGenGif && (
+              <div className="gen-bubble">
+                <CircularProgress size={16} style={{color:'var(--accent)'}} />
+                Generating GIF — this takes ~60 sec…
               </div>
             )}
 

@@ -30,6 +30,8 @@ echo.
 ::  pydantic         2.7.1         fastapi 0.111 fully supports v2
 ::  requests         2.31.0        no conflicts
 ::  python-dotenv    1.0.1         no conflicts
+::  imageio          2.33.1        GIF generation; stable for Python 3.10
+::  imageio-ffmpeg   0.4.10        ffmpeg bindings for imageio GIF output
 ::
 ::  Models:
 ::  SD model : Realistic_Vision_V6.0_B1_noVAE  (~2 GB, photorealistic)
@@ -180,6 +182,8 @@ pip install ^
     uvicorn==0.29.0 ^
     requests==2.31.0 ^
     python-dotenv==1.0.1 ^
+    imageio==2.33.1 ^
+    imageio-ffmpeg==0.4.10 ^
     --quiet
 if errorlevel 1 ( echo ERROR: API dependencies failed. & pause & exit /b 1 )
 echo   API dependencies installed.
@@ -352,6 +356,8 @@ echo    accelerate       0.32.1
 echo    numpy            1.26.4
 echo    fastapi          0.111.0  /  uvicorn 0.29.0
 echo    pydantic         2.7.1
+echo    imageio          2.33.1  (GIF generation)
+echo    imageio-ffmpeg   0.4.10  (GIF generation)
 echo.
 echo  Models downloaded:
 echo    LLM : llama2-uncensored:latest          (Ollama)
