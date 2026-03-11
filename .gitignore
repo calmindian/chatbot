@@ -31,10 +31,7 @@ models/
 # !models/**/model_index.json
 
 # ── Generated media (images & audio created at runtime) ───────
-media/images/
-media/audio/
-# Keep the placeholder avatar so the UI doesn't break on first load
-!media/avatar.png
+media/
 
 # ── Chat history (personal / runtime data) ────────────────────
 chat_history.json
