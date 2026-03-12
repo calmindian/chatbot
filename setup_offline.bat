@@ -151,7 +151,7 @@ pip install diffusers==0.29.2 --quiet
 if errorlevel 1 ( echo ERROR: diffusers failed. & pause & exit /b 1 )
 
 echo   [7g] imageio (used by PIL GIF assembly)...
-pip install imageio==2.33.1 imageio-ffmpeg==0.4.10 --quiet
+pip install imageio imageio-ffmpeg --quiet
 if errorlevel 1 ( echo ERROR: imageio failed. & pause & exit /b 1 )
 
 echo   ML dependencies installed.
