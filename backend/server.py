@@ -13,30 +13,22 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from diffusers import (
-    StableDiffusionPipeline,
-    AutoencoderKL,
-    AnimateDiffPipeline,
-    MotionAdapter,
-    EulerDiscreteScheduler,
-)
-from diffusers.utils import export_to_gif
+from diffusers import StableDiffusionPipeline, AutoencoderKL
 from dotenv import load_dotenv
 
 # ---------------- LOAD ENV ----------------
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-ROOT          = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASE_URL      = os.getenv("BASE_URL",    "http://127.0.0.1:8000")
-OLLAMA_URL    = os.getenv("OLLAMA_URL",  "http://localhost:11434/api/generate")
-MODEL_NAME    = os.getenv("MODEL_NAME",  "llama2-uncensored:latest")
-SD_PATH       = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",     "models/realistic")))
-VAE_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH",    "models/vae")))
-MOTION_PATH   = os.path.normpath(os.path.join(ROOT, os.getenv("MOTION_PATH", "models/motion")))
-MEDIA_FOLDER  = os.path.normpath(os.path.join(ROOT, "media"))
-IMAGE_FOLDER  = os.path.normpath(os.path.join(ROOT, "media", "images"))
-GIF_FOLDER    = os.path.normpath(os.path.join(ROOT, "media", "gifs"))
-MAX_HISTORY   = 20
+ROOT         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_URL     = os.getenv("BASE_URL",   "http://127.0.0.1:8000")
+OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+MODEL_NAME   = os.getenv("MODEL_NAME", "llama2-uncensored:latest")
+SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/realistic")))
+VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
+MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
+IMAGE_FOLDER = os.path.normpath(os.path.join(ROOT, "media", "images"))
+GIF_FOLDER   = os.path.normpath(os.path.join(ROOT, "media", "gifs"))
+MAX_HISTORY  = 20
 
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 os.makedirs(GIF_FOLDER,   exist_ok=True)
@@ -50,66 +42,25 @@ print(f"Device: {device.upper()}  |  dtype: {dtype}")
 print("Loading VAE...")
 vae_config = os.path.join(VAE_PATH, "config.json")
 if not os.path.exists(vae_config):
-    print(f"VAE not found at {VAE_PATH} — downloading stabilityai/sd-vae-ft-mse...")
-    try:
-        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
-        os.makedirs(VAE_PATH, exist_ok=True)
-        vae.save_pretrained(VAE_PATH)
-        print(f"VAE saved to {VAE_PATH}")
-    except Exception as e:
-        print(f"ERROR: VAE download failed: {e}")
-        raise
+    print(f"VAE not found — downloading stabilityai/sd-vae-ft-mse...")
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
+    os.makedirs(VAE_PATH, exist_ok=True)
+    vae.save_pretrained(VAE_PATH)
 else:
     vae = AutoencoderKL.from_pretrained(VAE_PATH, torch_dtype=dtype)
 
-# ── Stable Diffusion (still images) ──────────────────────────
-print("Loading Stable Diffusion pipeline (images)...")
+# ── Stable Diffusion ──────────────────────────────────────────
+# Single pipeline used for BOTH still images and GIFs.
+# AnimateDiff was removed — on RTX 3050 (4 GB VRAM) it requires swapping
+# 2 GB of weights CPU<->GPU which adds 20-30s overhead, making GIFs slower
+# than plain SD. GIFs are now generated as 4 SD frames + PIL assembly.
+print("Loading Stable Diffusion pipeline...")
 sd = StableDiffusionPipeline.from_pretrained(SD_PATH, vae=vae, torch_dtype=dtype)
 sd = sd.to(device)
 if device == "cpu":
     sd.enable_attention_slicing()
 sd.safety_checker = None
 print("SD pipeline loaded.")
-
-# ── AnimateDiff (GIFs) ────────────────────────────────────────
-# Uses the same SD checkpoint + VAE, adds a lightweight motion adapter (~200 MB).
-# The motion adapter teaches SD how to generate temporally consistent frames.
-print("Loading AnimateDiff motion adapter...")
-motion_config = os.path.join(MOTION_PATH, "config.json")
-if not os.path.exists(motion_config):
-    print(f"Motion adapter not found at {MOTION_PATH} — downloading guoyww/animatediff-motion-adapter-v1-5-2...")
-    try:
-        adapter = MotionAdapter.from_pretrained(
-            "guoyww/animatediff-motion-adapter-v1-5-2", torch_dtype=dtype
-        )
-        os.makedirs(MOTION_PATH, exist_ok=True)
-        adapter.save_pretrained(MOTION_PATH)
-        print(f"Motion adapter saved to {MOTION_PATH}")
-    except Exception as e:
-        print(f"ERROR: Motion adapter download failed: {e}")
-        raise
-else:
-    adapter = MotionAdapter.from_pretrained(MOTION_PATH, torch_dtype=dtype)
-
-print("Building AnimateDiff pipeline...")
-ad = AnimateDiffPipeline.from_pretrained(
-    SD_PATH,
-    motion_adapter=adapter,
-    vae=vae,
-    torch_dtype=dtype,
-)
-# EulerDiscreteScheduler with linear beta is the recommended scheduler for AnimateDiff
-ad.scheduler = EulerDiscreteScheduler.from_config(
-    ad.scheduler.config, beta_schedule="linear"
-)
-ad = ad.to(device)
-ad.safety_checker = None
-
-# RTX 3050 has 4 GB VRAM — these two flags are essential to avoid OOM on 16-frame GIFs
-ad.enable_vae_slicing()        # decode frames one at a time instead of all at once
-ad.enable_attention_slicing()  # chunk attention computation to save VRAM
-
-print("AnimateDiff pipeline loaded.")
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
@@ -159,31 +110,9 @@ class OutfitRequest(BaseModel):
 class PersonalityRequest(BaseModel):
     personality: str
 
-# ---------------- IMAGE HELPERS ----------------
-def _run_sd(prompt: str, steps: int = 35):
-    with torch.inference_mode():
-        return sd(
-            prompt,
-            negative_prompt=NEGATIVE_PROMPT,
-            num_inference_steps=steps,
-            guidance_scale=7.0,
-            clip_skip=2,
-            width=512,
-            height=768,
-        ).images[0]
-
-async def generate_image(prompt: str, steps: int = 35) -> str:
-    loop = asyncio.get_running_loop()
-    img  = await loop.run_in_executor(None, partial(_run_sd, prompt, steps))
-    img  = img.resize((1080, 1620), resample=Image.LANCZOS)
-    path = os.path.join(IMAGE_FOLDER, f"{uuid.uuid4()}.png")
-    img.save(path)
-    return os.path.relpath(path, ROOT).replace("\\", "/")
-
+# ---------------- PROMPT BUILDER ----------------
 def build_realistic_prompt(base: str, extra: str = "") -> str:
-    """
-    Pose and direction come from base/extra only — never hardcoded here.
-    """
+    """Pose and direction come from base/extra only — never hardcoded here."""
     suffix = (
         "full body shot, full length, head to toe, entire body visible, "
         "photo taken by friend, HD photograph, HD photo, "
@@ -197,37 +126,76 @@ def build_realistic_prompt(base: str, extra: str = "") -> str:
     parts = [p for p in [base, extra, suffix] if p]
     return ", ".join(parts)
 
-# ---------------- ANIMATEDIFF GIF ----------------
-def _run_animatediff(prompt: str) -> str:
-    """
-    Generate animated GIF using AnimateDiff.
-    - 16 frames in ONE pipeline pass (not 16 separate calls)
-    - 512x512 square (AnimateDiff v1.5 is trained at square resolution)
-    - 20 steps balances quality vs speed on RTX 3050 (~45-60s total)
-    - Output: all 16 frames as a looping GIF at 8fps = 2s loop
-    """
+# ---------------- STILL IMAGE ----------------
+def _run_sd(prompt: str, steps: int = 35, seed: int = -1):
+    generator = None
+    if seed >= 0:
+        generator = torch.Generator(device=device).manual_seed(seed)
     with torch.inference_mode():
-        output = ad(
-            prompt=prompt,
+        return sd(
+            prompt,
             negative_prompt=NEGATIVE_PROMPT,
-            num_frames=16,           # 16 frames = smooth 2s loop at 8fps
-            num_inference_steps=20,  # 20 steps — good quality, ~45-60s on RTX 3050
-            guidance_scale=7.5,
+            num_inference_steps=steps,
+            guidance_scale=7.0,
             clip_skip=2,
             width=512,
-            height=512,              # AnimateDiff v1.5 is trained at 512x512
-            generator=torch.Generator(device=device).manual_seed(42),
-        )
+            height=768,
+            generator=generator,
+        ).images[0]
 
-    frames   = output.frames[0]  # list of 16 PIL Images
+async def generate_image(prompt: str, steps: int = 35) -> str:
+    loop = asyncio.get_running_loop()
+    img  = await loop.run_in_executor(None, partial(_run_sd, prompt, steps))
+    img  = img.resize((1080, 1620), resample=Image.LANCZOS)
+    path = os.path.join(IMAGE_FOLDER, f"{uuid.uuid4()}.png")
+    img.save(path)
+    return os.path.relpath(path, ROOT).replace("\\", "/")
+
+# ---------------- GIF (SD multi-frame) ----------------
+# Why not AnimateDiff: on RTX 3050 (4 GB VRAM) AnimateDiff cannot share VRAM
+# with SD. Pipeline swapping moves ~2 GB of weights CPU<->GPU twice per GIF,
+# adding 20-30s of overhead with no visible quality benefit at this resolution.
+#
+# This approach: generate 4 frames at 20 steps each using the SD pipeline that
+# is already hot on GPU. Total ~20s. Frames use nearby seeds so they share the
+# same general composition and feel like a smooth loop.
+GIF_SEEDS = [42, 43, 44, 45]  # close seeds = similar composition per frame
+
+def _run_gif(prompt: str) -> str:
+    frames = []
+    with torch.inference_mode():
+        for seed in GIF_SEEDS:
+            generator = torch.Generator(device=device).manual_seed(seed)
+            img = sd(
+                prompt,
+                negative_prompt=NEGATIVE_PROMPT,
+                num_inference_steps=20,  # 20 steps × 4 frames ≈ same GPU work as 1 still image
+                guidance_scale=7.0,
+                clip_skip=2,
+                width=512,
+                height=512,              # square for GIF — fits 4 frames in same VRAM budget
+                generator=generator,
+            ).images[0]
+            frames.append(img)
+
+    # Build looping GIF: forward + reverse so it loops smoothly without a hard jump
+    loop_frames = frames + frames[-2:0:-1]   # [0,1,2,3,2,1] — 6 frames, seamless loop
+
     filename = f"{uuid.uuid4()}.gif"
     out_path = os.path.join(GIF_FOLDER, filename)
-    export_to_gif(frames, out_path, fps=8)
+    loop_frames[0].save(
+        out_path,
+        save_all=True,
+        append_images=loop_frames[1:],
+        duration=120,        # 120ms per frame = ~8fps
+        loop=0,              # loop forever
+        optimize=False,
+    )
     return f"media/gifs/{filename}"
 
 async def generate_gif(prompt: str) -> str:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, partial(_run_animatediff, prompt))
+    return await loop.run_in_executor(None, partial(_run_gif, prompt))
 
 # ---------------- OLLAMA ----------------
 def _ollama_sync(prompt: str) -> str:
@@ -320,20 +288,34 @@ async def chat(data: ChatRequest):
     if not user_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
-    # GIF request — AnimateDiff
-    gif_keywords = ["gif", "animate", "dancing", "walking", "moving", "motion", "video", "action"]
-    if any(kw in user_message.lower() for kw in gif_keywords):
+    # GIF keywords → map to clean motion word for prompt
+    gif_keyword_map = {
+        "dancing": "dancing", "dance": "dancing",
+        "walking": "walking", "walk":  "walking",
+        "running": "running", "run":   "running",
+        "waving":  "waving",  "wave":  "waving",
+        "moving":  "moving naturally", "motion": "moving naturally",
+        "action":  "dynamic pose",
+        "animate": "moving naturally",
+        "gif":     "moving naturally",
+        "video":   "moving naturally",
+    }
+    matched_motion = next(
+        (gif_keyword_map[kw] for kw in gif_keyword_map if kw in user_message.lower()),
+        None
+    )
+    if matched_motion:
         if not avatar_prompt:
             return {"reply": "Please create an avatar first! Use the settings panel.", "gif": None}
         try:
-            prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {user_message}")
+            prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {matched_motion}")
             rel_path = await generate_gif(prompt)
             return {"reply": "Here is an animated GIF of me! 🎬", "gif": f"{BASE_URL}/{rel_path}"}
         except Exception as e:
-            print(f"[AnimateDiff error] {e}")
+            print(f"[GIF error] {e}")
             return {"reply": "Sorry, GIF generation failed. Check server logs.", "gif": None}
 
-    # Image request — Stable Diffusion
+    # Image keywords
     image_keywords = ["image", "picture", "photo", "pic", "selfie", "show me", "draw"]
     if any(kw in user_message.lower() for kw in image_keywords):
         if not avatar_prompt:
@@ -342,7 +324,7 @@ async def chat(data: ChatRequest):
         rel_path = await generate_image(prompt)
         return {"reply": "Here is a picture of me ❤️", "image": f"{BASE_URL}/{rel_path}"}
 
-    # Text chat — Ollama
+    # Text chat
     chat_history.append(f"User: {user_message}")
     trim_history()
 
