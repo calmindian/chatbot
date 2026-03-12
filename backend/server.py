@@ -116,23 +116,26 @@ class PersonalityRequest(BaseModel):
     personality: str
 
 # ---------------- PROMPT BUILDER ----------------
-def build_realistic_prompt(base: str, extra: str = "") -> str:
-    """Pose and direction come from base/extra only — never hardcoded here."""
+def build_realistic_prompt(base: str, extra: str = "", background: str = "natural") -> str:
+    """Build a natural image prompt from base description and context."""
+    # Use natural descriptors instead of technical photography terms
     suffix = (
-        "full body shot, full length, head to toe, entire body visible, "
-        "photo taken by friend, HD photograph, HD photo, "
-        "natural light, realistic everyday background, "
-        "photorealistic, hyperrealistic, RAW photo, "
-        "detailed face, beautiful face, detailed eyes, realistic eyes, "
-        "catchlight in eyes, natural skin texture, "
-        "detailed hands, detailed feet, realistic clothing fabric, "
-        "masterpiece, best quality, sharp focus"
+        "natural pose, realistic lighting, high quality"
     )
-    parts = [p for p in [base, extra, suffix] if p]
+
+    # Build context based on background type
+    if background == "plain":
+        context = "simple, plain white background"
+    elif background == "avatar":
+        context = "clean white background, professional look"
+    else:
+        context = "in a natural everyday setting"
+
+    parts = [p for p in [base, extra, context, suffix] if p]
     return ", ".join(parts)
 
 # ---------------- STILL IMAGE ----------------
-def _run_sd(prompt: str, steps: int = 35, seed: int = -1):
+def _run_sd(prompt: str, steps: int = 45, seed: int = -1):
     generator = None
     if seed >= 0:
         generator = torch.Generator(device=device).manual_seed(seed)
@@ -143,15 +146,14 @@ def _run_sd(prompt: str, steps: int = 35, seed: int = -1):
             num_inference_steps=steps,
             guidance_scale=7.0,
             clip_skip=2,
-            width=512,
-            height=768,
+            width=600,
+            height=800,
             generator=generator,
         ).images[0]
 
-async def generate_image(prompt: str, steps: int = 35) -> str:
+async def generate_image(prompt: str, steps: int = 45) -> str:
     loop = asyncio.get_running_loop()
     img  = await loop.run_in_executor(None, partial(_run_sd, prompt, steps))
-    img  = img.resize((1080, 1620), resample=Image.LANCZOS)
     path = os.path.join(IMAGE_FOLDER, f"{uuid.uuid4()}.png")
     img.save(path)
     return os.path.relpath(path, ROOT).replace("\\", "/")
@@ -174,7 +176,7 @@ def _run_gif(prompt: str) -> str:
             img = sd(
                 prompt,
                 negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=20,  # 20 steps × 4 frames ≈ same GPU work as 1 still image
+                num_inference_steps=45,  # 45 steps × 4 frames ≈ same GPU work as 1 still image
                 guidance_scale=7.0,
                 clip_skip=2,
                 width=256,
@@ -311,23 +313,28 @@ async def chat(data: ChatRequest):
     )
     if matched_motion:
         if not avatar_prompt:
-            return {"reply": "Please create an avatar first! Use the settings panel.", "gif": None}
+            return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "gif": None}
         try:
-            prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {matched_motion}")
+            prompt   = build_realistic_prompt(avatar_prompt, f"{matched_motion} in {outfit.lower()}")
             rel_path = await generate_gif(prompt)
-            return {"reply": "Here is an animated GIF of me! 🎬", "gif": f"{BASE_URL}/{rel_path}"}
+            return {"reply": "Here's me in action!", "gif": f"{BASE_URL}/{rel_path}"}
         except Exception as e:
             print(f"[GIF error] {e}")
-            return {"reply": "Sorry, GIF generation failed. Check server logs.", "gif": None}
+            return {"reply": "Hmm, something went wrong with that animation. Try again?", "gif": None}
 
     # Image keywords
     image_keywords = ["image", "picture", "photo", "pic", "selfie", "show me", "draw"]
     if any(kw in user_message.lower() for kw in image_keywords):
         if not avatar_prompt:
-            return {"reply": "Please create an avatar first! Use the settings panel.", "image": None}
-        prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, {user_message}")
+            return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "image": None}
+        # Clean up user prompt for more natural results
+        user_context = user_message.lower()
+        for kw in image_keywords:
+            user_context = user_context.replace(kw, "").strip()
+        extra = f"in {outfit.lower()}, {user_context}" if user_context else f"in {outfit.lower()}"
+        prompt   = build_realistic_prompt(avatar_prompt, extra)
         rel_path = await generate_image(prompt)
-        return {"reply": "Here is a picture of me ❤️", "image": f"{BASE_URL}/{rel_path}"}
+        return {"reply": "Here you go!", "image": f"{BASE_URL}/{rel_path}"}
 
     # Text chat
     chat_history.append(f"User: {user_message}")
@@ -335,9 +342,11 @@ async def chat(data: ChatRequest):
 
     sys_prompt = (
         f"You are a {personality} AI companion. "
-        f"Appearance: {avatar_prompt}. Outfit: {outfit}.\n"
+        f"Appearance: {avatar_prompt}. Current outfit: {outfit}.\n"
+        f"Be yourself, authentic, and natural in conversation. "
+        f"Engage genuinely with what the user says, staying true to your character.\n"
         f"Recent chat:\n{chr(10).join(chat_history[-4:])}\n"
-        f"Reply warmly and in character. 1-2 sentences max."
+        f"Respond naturally and conversationally."
     )
 
     reply = await ollama_chat_async(sys_prompt)
@@ -355,11 +364,13 @@ async def set_avatar(data: AvatarRequest):
     if not avatar_prompt:
         raise HTTPException(status_code=400, detail="Avatar prompt cannot be empty.")
 
+    outfit_text = outfit.lower() if outfit else "casual clothes"
     prompt   = build_realistic_prompt(
         avatar_prompt,
-        f"wearing {outfit if outfit else 'casual clothes'}, plain white background"
+        f"in {outfit_text}",
+        background="avatar"
     )
-    rel_path = await generate_image(prompt)
+    rel_path = await generate_image(prompt, steps=45)
     shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
     return {"avatar": f"{BASE_URL}/media/avatar.png"}
 
@@ -371,9 +382,9 @@ async def change_outfit(data: OutfitRequest):
     if not outfit:
         raise HTTPException(status_code=400, detail="Outfit cannot be empty.")
 
-    prompt   = build_realistic_prompt(avatar_prompt, f"wearing {outfit}, plain background")
+    prompt   = build_realistic_prompt(avatar_prompt, f"in {outfit.lower()}", background="plain")
     rel_path = await generate_image(prompt)
-    return {"reply": f"Outfit changed to {outfit}! 👗", "image": f"{BASE_URL}/{rel_path}"}
+    return {"reply": f"All dressed up in {outfit}!", "image": f"{BASE_URL}/{rel_path}"}
 
 
 @app.post("/setpersonality")
@@ -382,4 +393,4 @@ async def set_personality(data: PersonalityRequest):
     personality = data.personality.strip()
     if not personality:
         raise HTTPException(status_code=400, detail="Personality cannot be empty.")
-    return {"reply": f"Personality set to {personality}! ✨"}
+    return {"reply": f"I'll be more {personality} from now on."}

@@ -332,6 +332,9 @@ const css = `
     max-width: 68%;
     animation: fadeUp .2s ease;
   }
+  .msg-row.image-msg {
+    max-width: 76%;
+  }
   @keyframes fadeUp {
     from { opacity: 0; transform: translateY(8px); }
     to   { opacity: 1; transform: translateY(0); }
@@ -348,6 +351,14 @@ const css = `
     position: relative;
     box-shadow: var(--shadow);
     word-break: break-word;
+  }
+  /* Reduce padding for image-heavy messages */
+  .msg-bubble:has(.msg-image) {
+    padding: 0;
+  }
+  /* Add padding back to text if present */
+  .msg-bubble:has(.msg-image):has(:first-child:not(.msg-image)) {
+    padding-bottom: 8px;
   }
   .msg-row.user  .msg-bubble {
     background: var(--bg-user-msg);
@@ -369,14 +380,29 @@ const css = `
     font-size: 11px;
     color: var(--text-time);
     opacity: .8;
+    padding: 0 12px 6px;
   }
 
   .msg-image {
     max-width: 100%;
-    border-radius: 6px;
-    margin-top: 6px;
+    width: 100%;
+    height: auto;
+    aspect-ratio: auto;
+    border-radius: 8px;
     display: block;
     cursor: zoom-in;
+    object-fit: cover;
+    object-position: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,.3);
+  }
+
+  /* Stack images better in the bubble */
+  .msg-text {
+    padding: 8px 12px;
+  }
+  .msg-bubble .msg-text + .msg-image {
+    margin-top: 6px;
+    border-radius: 6px;
   }
 
   .msg-gap { height: 6px; }
@@ -831,7 +857,7 @@ export default function App() {
               <textarea
                 className="wa-input"
                 rows={2}
-                placeholder="e.g. young woman with brown hair, green eyes…"
+                placeholder="Describe your avatar…"
                 value={avatarPrompt}
                 onChange={e => setAvatarPrompt(e.target.value)}
               />
@@ -854,7 +880,7 @@ export default function App() {
               </div>
               <input
                 className="wa-input"
-                placeholder="e.g. red summer dress, casual hoodie…"
+                placeholder="Describe an outfit…"
                 value={outfit}
                 onChange={e => setOutfit(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleChangeOutfit()}
@@ -878,7 +904,7 @@ export default function App() {
               </div>
               <input
                 className="wa-input"
-                placeholder="e.g. shy, bubbly, sarcastic, caring…"
+                placeholder="Describe a personality…"
                 value={personality}
                 onChange={e => setPersonality(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleChangePersonality()}
@@ -984,14 +1010,15 @@ export default function App() {
 
             {messages.map((msg, i) => {
               const isUser = msg.role === 'user';
+              const hasImage = msg.image || msg.gif;
               // show gap between consecutive same-sender msgs
               const prevSame = i > 0 && messages[i-1].role === msg.role;
               return (
                 <React.Fragment key={i}>
                   {prevSame && <div className="msg-gap" />}
-                  <div className={`msg-row ${isUser ? 'user' : 'ai'}`}>
+                  <div className={`msg-row ${isUser ? 'user' : 'ai'} ${hasImage ? 'image-msg' : ''}`}>
                     <div className="msg-bubble">
-                      {msg.text}
+                      {msg.text && <span className="msg-text">{msg.text}</span>}
                       {msg.gif && (
                         <img
                           className="msg-image"
