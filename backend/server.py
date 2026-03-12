@@ -64,25 +64,30 @@ print("SD pipeline loaded.")
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
+    # phones / selfie artifacts
     "phone, smartphone, holding phone, selfie stick, camera in hand, "
     "selfie, mirror selfie, hand holding phone, phone visible, "
+    # studio / professional look
     "professional photography, studio lighting, studio background, "
     "DSLR, Canon, Nikon, Sony, 85mm, 35mm lens, f/1.8, bokeh, "
-    "professional photographer, fashion shoot, magazine cover, "
     "perfect lighting, dramatic lighting, rim light, "
     "8k, UHD, ultra high resolution, "
+    # crop / framing defects
     "cropped, cut off, out of frame, partial body, headshot only, "
     "close-up only, portrait only, bust only, waist up only, "
+    # face defects
     "deformed face, disfigured, bad face, ugly face, "
     "asymmetrical face, cross-eyed, extra eyes, lazy eye, "
     "poorly drawn face, mutated face, mutation, "
     "bad teeth, crooked teeth, bad eyes, bad lips, "
     "double face, cloned face, weird face, "
+    # body / anatomy defects
     "extra fingers, missing fingers, extra limbs, missing limbs, "
     "bad anatomy, bad proportions, deformed body, deformed legs, "
     "deformed feet, bad feet, missing feet, floating limbs, "
     "extra arms, extra hands, fused fingers, disconnected limbs, "
     "unnatural pose, stiff pose, "
+    # quality
     "cartoon, anime, illustration, painting, drawing, sketch, "
     "blurry, out of focus, soft focus, low quality, low resolution, "
     "watermark, signature, text, logo, username, "
@@ -172,8 +177,8 @@ def _run_gif(prompt: str) -> str:
                 num_inference_steps=20,  # 20 steps × 4 frames ≈ same GPU work as 1 still image
                 guidance_scale=7.0,
                 clip_skip=2,
-                width=512,
-                height=512,              # square for GIF — fits 4 frames in same VRAM budget
+                width=256,
+                height=256,
                 generator=generator,
             ).images[0]
             frames.append(img)

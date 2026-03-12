@@ -631,19 +631,29 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping, isGenImg, isGenGif]);
 
-  // Check server connectivity on mount and periodically
+  // Check server connectivity on mount and periodically.
+  // Uses native fetch + AbortController instead of axios — axios timeout is
+  // unreliable in browsers for connection-refused errors and can hang silently.
+  // fetch throws a TypeError immediately when the server is not running.
   useEffect(() => {
     const checkServer = async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3000); // hard 3s timeout
       try {
-        await api.get('/health', { timeout: 3000 });
-        setIsServerOnline(true);
+        const res = await fetch(`${API_BASE}/health?t=${Date.now()}`, {
+          signal: controller.signal,
+          cache: 'no-store',
+        });
+        clearTimeout(timer);
+        setIsServerOnline(res.ok);
       } catch {
+        clearTimeout(timer);
         setIsServerOnline(false);
       }
     };
 
     checkServer();
-    const interval = setInterval(checkServer, 5000); // Check every 5 seconds
+    const interval = setInterval(checkServer, 5000);
     return () => clearInterval(interval);
   }, []);
 
