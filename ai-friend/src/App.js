@@ -945,7 +945,7 @@ export default function App() {
             <div className="chat-header-info">
               <div className="chat-header-name">AI Friend</div>
               <div className={`chat-header-status ${(isTyping||isGenImg||isGenGif) ? 'typing' : ''}`}>
-                {isGenGif  ? '🎬 Generating GIF…'
+                {isGenGif  ? '🎬 Generating GIF… (~60s)'
                  : isGenImg  ? '🎨 Generating image…'
                  : isTyping ? 'typing…'
                  : 'tap to see profile & settings'}
