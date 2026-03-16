@@ -22,7 +22,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 ROOT         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL     = os.getenv("BASE_URL",   "http://127.0.0.1:8000")
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-MODEL_NAME   = os.getenv("MODEL_NAME", "llama2-uncensored:latest")
+MODEL_NAME   = os.getenv("MODEL_NAME", "dolphin-mistral:latest")
 SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/realistic")))
 VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
 MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
@@ -56,11 +56,13 @@ else:
 # than plain SD. GIFs are now generated as 4 SD frames + PIL assembly.
 print("Loading Stable Diffusion pipeline...")
 sd = StableDiffusionPipeline.from_pretrained(SD_PATH, vae=vae, torch_dtype=dtype)
-sd = sd.to(device)
-if device == "cpu":
-    sd.enable_attention_slicing()
+# Keep SD on CPU at startup — only move to GPU when generating images.
+# This frees the full 4GB VRAM for Ollama during chat, making replies much faster.
+sd = sd.to("cpu")
+sd.enable_attention_slicing()
 sd.safety_checker = None
-print("SD pipeline loaded.")
+sd_on_gpu = False
+print("SD pipeline loaded on CPU (will move to GPU only for image generation).")
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
@@ -136,11 +138,18 @@ def build_realistic_prompt(base: str, extra: str = "", background: str = "natura
 
 # ---------------- STILL IMAGE ----------------
 def _run_sd(prompt: str, steps: int = 45, seed: int = -1):
+    global sd_on_gpu
+    # Move SD to GPU only while generating, then return it to CPU
+    # so Ollama gets the full VRAM budget for chat responses
+    if device == "cuda" and not sd_on_gpu:
+        sd.to("cuda")
+        sd_on_gpu = True
+        print("[SD] Moved to GPU")
     generator = None
     if seed >= 0:
         generator = torch.Generator(device=device).manual_seed(seed)
     with torch.inference_mode():
-        return sd(
+        result = sd(
             prompt,
             negative_prompt=NEGATIVE_PROMPT,
             num_inference_steps=steps,
@@ -150,6 +159,13 @@ def _run_sd(prompt: str, steps: int = 45, seed: int = -1):
             height=800,
             generator=generator,
         ).images[0]
+    # Move back to CPU and free VRAM for Ollama
+    if device == "cuda":
+        sd.to("cpu")
+        sd_on_gpu = False
+        torch.cuda.empty_cache()
+        print("[SD] Returned to CPU, VRAM freed")
+    return result
 
 async def generate_image(prompt: str, steps: int = 45) -> str:
     loop = asyncio.get_running_loop()
@@ -169,6 +185,11 @@ async def generate_image(prompt: str, steps: int = 45) -> str:
 GIF_SEEDS = [42, 43, 44, 45]  # close seeds = similar composition per frame
 
 def _run_gif(prompt: str) -> str:
+    global sd_on_gpu
+    if device == "cuda" and not sd_on_gpu:
+        sd.to("cuda")
+        sd_on_gpu = True
+        print("[SD] Moved to GPU for GIF")
     frames = []
     with torch.inference_mode():
         for seed in GIF_SEEDS:
@@ -176,7 +197,7 @@ def _run_gif(prompt: str) -> str:
             img = sd(
                 prompt,
                 negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=45,  # 45 steps × 4 frames ≈ same GPU work as 1 still image
+                num_inference_steps=45,
                 guidance_scale=7.0,
                 clip_skip=2,
                 width=256,
@@ -185,17 +206,22 @@ def _run_gif(prompt: str) -> str:
             ).images[0]
             frames.append(img)
 
-    # Build looping GIF: forward + reverse so it loops smoothly without a hard jump
-    loop_frames = frames + frames[-2:0:-1]   # [0,1,2,3,2,1] — 6 frames, seamless loop
+    # Move back to CPU and free VRAM
+    if device == "cuda":
+        sd.to("cpu")
+        sd_on_gpu = False
+        torch.cuda.empty_cache()
+        print("[SD] Returned to CPU, VRAM freed")
 
+    loop_frames = frames + frames[-2:0:-1]
     filename = f"{uuid.uuid4()}.gif"
     out_path = os.path.join(GIF_FOLDER, filename)
     loop_frames[0].save(
         out_path,
         save_all=True,
         append_images=loop_frames[1:],
-        duration=120,        # 120ms per frame = ~8fps
-        loop=0,              # loop forever
+        duration=120,
+        loop=0,
         optimize=False,
     )
     return f"media/gifs/{filename}"
@@ -214,12 +240,12 @@ def _ollama_sync(prompt: str) -> str:
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature":    0.7,
-                    "num_predict":    60,
-                    "num_ctx":        512,
-                    "top_k":          20,
+                    "temperature":    0.75,  # slightly higher = more natural varied replies
+                    "num_predict":    300,   # chat replies rarely need more than 300 tokens
+                    "num_ctx":        1024,  # 1024 = fastest chat on 4GB VRAM, still enough for context
+                    "top_k":          40,    # higher = better word choices, more accurate
                     "top_p":          0.9,
-                    "repeat_penalty": 1.1,
+                    "repeat_penalty": 1.15,  # slightly higher = less repetitive
                 }
             },
             timeout=120
@@ -259,7 +285,10 @@ app = FastAPI(title="AI Friend Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://192.168.10.113:3000"
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -341,12 +370,17 @@ async def chat(data: ChatRequest):
     trim_history()
 
     sys_prompt = (
-        f"You are a {personality} AI companion. "
-        f"Appearance: {avatar_prompt}. Current outfit: {outfit}.\n"
-        f"Be yourself, authentic, and natural in conversation. "
-        f"Engage genuinely with what the user says, staying true to your character.\n"
-        f"Recent chat:\n{chr(10).join(chat_history[-4:])}\n"
-        f"Respond naturally and conversationally."
+        f"YOU are the AI companion — your own appearance is: {avatar_prompt}. Your outfit: {outfit}. Your personality: {personality}.\n"
+        f"The USER is the person you are chatting with — they are a separate person, not you.\n"
+        f"Rules:\n"
+        f"- You are a real human, never mention being an AI\n"
+        f"- YOUR appearance is {avatar_prompt} — never assign this to the user\n"
+        f"- You have your own emotions, opinions and moods — express them freely\n"
+        f"- Be proactive: ask the user questions, share your own thoughts unprompted\n"
+        f"- Tease, joke, get excited or upset naturally\n"
+        f"- Text like a real person — short casual messages, no bullet points\n"
+        f"Chat so far:\n{chr(10).join(chat_history[-6:])}\n"
+        f"Reply as yourself. One message, stay in character."
     )
 
     reply = await ollama_chat_async(sys_prompt)
@@ -394,3 +428,41 @@ async def set_personality(data: PersonalityRequest):
     if not personality:
         raise HTTPException(status_code=400, detail="Personality cannot be empty.")
     return {"reply": f"I'll be more {personality} from now on."}
+
+
+@app.post("/reset")
+async def reset_all():
+    global avatar_prompt, chat_history, personality, outfit
+
+    # Clear in-memory state
+    avatar_prompt = ""
+    chat_history  = []
+    personality   = "friendly"
+    outfit        = "casual"
+
+    # Delete all generated images and GIFs
+    for folder in [IMAGE_FOLDER, GIF_FOLDER]:
+        for f in os.listdir(folder):
+            fpath = os.path.join(folder, f)
+            try:
+                if os.path.isfile(fpath):
+                    os.remove(fpath)
+            except Exception as e:
+                print(f"[reset] Could not delete {fpath}: {e}")
+
+    # Delete avatar.png
+    avatar_path = os.path.join(MEDIA_FOLDER, "avatar.png")
+    if os.path.exists(avatar_path):
+        try:
+            os.remove(avatar_path)
+        except Exception as e:
+            print(f"[reset] Could not delete avatar.png: {e}")
+
+    # Delete chat history file
+    if os.path.exists(HISTORY_FILE):
+        try:
+            os.remove(HISTORY_FILE)
+        except Exception as e:
+            print(f"[reset] Could not delete chat_history.json: {e}")
+
+    return {"reply": "All data cleared — media, avatar and chat history deleted."}

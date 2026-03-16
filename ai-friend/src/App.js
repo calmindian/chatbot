@@ -627,6 +627,7 @@ export default function App() {
   const [loadingOutfit,      setLoadingOutfit]       = useState(false);
   const [loadingPersonality, setLoadingPersonality]  = useState(false);
   const [loadingChat,        setLoadingChat]         = useState(false);
+  const [loadingReset,       setLoadingReset]        = useState(false);
 
   // chat
   const [messages,  setMessages]  = useState([]);
@@ -757,7 +758,22 @@ export default function App() {
     finally  { setLoadingPersonality(false); }
   };
 
-  // ── Send message ────────────────────────────────────────────
+  // ── Reset all data ──────────────────────────────────────────
+  const handleReset = async () => {
+    if (!window.confirm('Delete all media, avatar and chat history? This cannot be undone.')) return;
+    setLoadingReset(true);
+    try {
+      await api.post('/reset');
+      setMessages([]);
+      setAvatarPrompt('');
+      setOutfit('');
+      setPersonality('friendly');
+      setAvatarSrc(`https://ui-avatars.com/api/?name=AI&background=005c4b&color=fff`);
+      showInfo('All data cleared 🗑️');
+      setSidebarOpen(false);
+    } catch { showError('Reset failed. Check server logs.'); }
+    finally  { setLoadingReset(false); }
+  };
   const handleSend = async () => {
     const text = message.trim();
     if (!text || loadingChat) return;
@@ -959,6 +975,25 @@ export default function App() {
               Say <em>"show me a photo"</em> or <em>"take a selfie"</em> to generate an image.
               <br/><br/>
               Be descriptive when creating your avatar for best results.
+            </div>
+
+            {/* Reset section */}
+            <div className="panel-section">
+              <div className="panel-label">⚠️ Danger Zone</div>
+              <button
+                className="wa-btn"
+                onClick={handleReset}
+                disabled={loadingReset}
+                style={{background:'#c0392b'}}
+              >
+                {loadingReset
+                  ? <><CircularProgress size={14} color="inherit" /> Clearing…</>
+                  : <>🗑️ Delete All Data</>
+                }
+              </button>
+              <div style={{fontSize:11, color:'var(--text-secondary)', marginTop:6, lineHeight:1.5}}>
+                Removes all images, GIFs, avatar and chat history.
+              </div>
             </div>
 
           </div>
