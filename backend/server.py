@@ -13,8 +13,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from diffusers import StableDiffusionPipeline, AutoencoderKL
+from diffusers import StableDiffusionPipeline, AutoencoderKL, DPMSolverMultistepScheduler
 from dotenv import load_dotenv
+
+# ─────────────────────────────────────────────────────────────
+# Progress tracking for image/GIF generation
+gen_progress = {}  # {request_id: {"progress": 0-100, "type": "image|gif"}}
+# ─────────────────────────────────────────────────────────────
 
 # ---------------- LOAD ENV ----------------
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -22,8 +27,8 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 ROOT         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL     = os.getenv("BASE_URL",   "http://127.0.0.1:8000")
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-MODEL_NAME   = os.getenv("MODEL_NAME", "dolphin-mistral:latest")
-SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/realistic")))
+MODEL_NAME   = os.getenv("MODEL_NAME", "mistral:latest")
+SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/dreamshaper")))
 VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
 MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
 IMAGE_FOLDER = os.path.normpath(os.path.join(ROOT, "media", "images"))
@@ -56,16 +61,28 @@ else:
 # than plain SD. GIFs are now generated as 4 SD frames + PIL assembly.
 print("Loading Stable Diffusion pipeline...")
 sd = StableDiffusionPipeline.from_pretrained(SD_PATH, vae=vae, torch_dtype=dtype)
-# Keep SD on CPU at startup — only move to GPU when generating images.
-# This frees the full 4GB VRAM for Ollama during chat, making replies much faster.
-sd = sd.to("cpu")
+# Keep SD on GPU full-time for faster image/GIF generation.
+# Chat (Ollama) will be slower due to shared VRAM, but image generation will be much faster.
+sd = sd.to(device)
+# Optimize for quality: use DPMSolver scheduler (better anatomy/details)
+sd.scheduler = DPMSolverMultistepScheduler.from_config(sd.scheduler.config)
 sd.enable_attention_slicing()
+if device == "cuda":
+    try:
+        sd.enable_xformers_memory_efficient_attention()
+        print("[SD] xFormers enabled for better quality")
+    except Exception:
+        print("[SD] xFormers not available, using standard attention")
 sd.safety_checker = None
-sd_on_gpu = False
-print("SD pipeline loaded on CPU (will move to GPU only for image generation).")
+sd_on_gpu = True if device == "cuda" else False
+print(f"SD pipeline loaded on {device.upper()} (optimized for anatomy/hand quality).")
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
+    # eyes specifically
+    "bad eyes, empty eyes, dead eyes, lifeless eyes, "
+    "asymmetrical eyes, cross-eyed, lazy eye, uneven eyes, "
+    "eye looking away, wrong eye direction, "
     # phones / selfie artifacts
     "phone, smartphone, holding phone, selfie stick, camera in hand, "
     "selfie, mirror selfie, hand holding phone, phone visible, "
@@ -79,22 +96,24 @@ NEGATIVE_PROMPT = (
     "close-up only, portrait only, bust only, waist up only, "
     # face defects
     "deformed face, disfigured, bad face, ugly face, "
-    "asymmetrical face, cross-eyed, extra eyes, lazy eye, "
-    "poorly drawn face, mutated face, mutation, "
-    "bad teeth, crooked teeth, bad eyes, bad lips, "
-    "double face, cloned face, weird face, "
+    "asymmetrical face, poorly drawn face, mutated face, mutation, "
+    "bad teeth, crooked teeth, bad lips, "
+    "double face, cloned face, weird face, squinting, "
     # body / anatomy defects
     "extra fingers, missing fingers, extra limbs, missing limbs, "
     "bad anatomy, bad proportions, deformed body, deformed legs, "
     "deformed feet, bad feet, missing feet, floating limbs, "
     "extra arms, extra hands, fused fingers, disconnected limbs, "
-    "unnatural pose, stiff pose, "
+    "unnatural pose, stiff pose, twisted torso, broken bones, "
+    # specific human flaws
+    "distorted human, inhuman, alien features, plastic face, "
+    "soulless, uncanny valley, creepy, "
     # quality
     "cartoon, anime, illustration, painting, drawing, sketch, "
     "blurry, out of focus, soft focus, low quality, low resolution, "
     "watermark, signature, text, logo, username, "
     "oversaturated, undersaturated, plastic skin, waxy skin, "
-    "fake, 3d render, cgi, airbrushed, "
+    "fake, 3d render, cgi, airbrushed, video game, "
     "worst quality, normal quality, jpeg artifacts, noise, grain"
 )
 
@@ -119,32 +138,46 @@ class PersonalityRequest(BaseModel):
 
 # ---------------- PROMPT BUILDER ----------------
 def build_realistic_prompt(base: str, extra: str = "", background: str = "natural") -> str:
-    """Build a natural image prompt from base description and context."""
-    # Use natural descriptors instead of technical photography terms
+    """Build a natural image prompt from base description and context, optimized for humans."""
+    # Use quality descriptors that improve human generation
     suffix = (
-        "natural pose, realistic lighting, high quality"
+        "natural pose, realistic lighting, high quality, sharp focus, "
+        "anatomically correct, professional quality, beautiful skin, "
+        "natural expression, perfect proportions"
     )
 
     # Build context based on background type
     if background == "plain":
-        context = "simple, plain white background"
+        context = "simple, plain white background, clean background"
     elif background == "avatar":
-        context = "clean white background, professional look"
+        context = "clean white background, professional look, portrait quality"
     else:
-        context = "in a natural everyday setting"
+        context = "in a natural everyday setting, natural environment"
 
     parts = [p for p in [base, extra, context, suffix] if p]
     return ", ".join(parts)
 
 # ---------------- STILL IMAGE ----------------
-def _run_sd(prompt: str, steps: int = 45, seed: int = -1):
-    global sd_on_gpu
-    # Move SD to GPU only while generating, then return it to CPU
-    # so Ollama gets the full VRAM budget for chat responses
-    if device == "cuda" and not sd_on_gpu:
-        sd.to("cuda")
-        sd_on_gpu = True
-        print("[SD] Moved to GPU")
+def _run_sd(prompt: str, request_id: str, steps: int = 60, seed: int = -1, total_frames: int = 1):
+    # Progress callback for diffusers pipeline
+    def callback_on_step_end(pipe, step_idx, timestep, callback_kwargs):
+        # For images: step_idx goes 0 to steps-1
+        # For GIFs: we'll scale appropriately
+        base_progress = (step_idx + 1) / steps
+        # Account for multiple frames in GIF (frames 0-3 will be 0%, then each frame adds ~25%)
+        if total_frames > 1:
+            frame_idx = (step_idx * total_frames) // steps
+            adjusted_progress = frame_idx / total_frames + (base_progress / (steps * total_frames))
+        else:
+            adjusted_progress = base_progress
+        gen_progress[request_id] = {
+            "progress": min(99, int(adjusted_progress * 100)),  # cap at 99%, 100% will be set when done
+            "type": "image" if total_frames == 1 else "gif"
+        }
+        return callback_kwargs
+
+    # DreamShaper: optimized for photorealistic humans, good color & detail
+    # 60 steps balances quality + speed
     generator = None
     if seed >= 0:
         generator = torch.Generator(device=device).manual_seed(seed)
@@ -153,23 +186,19 @@ def _run_sd(prompt: str, steps: int = 45, seed: int = -1):
             prompt,
             negative_prompt=NEGATIVE_PROMPT,
             num_inference_steps=steps,
-            guidance_scale=7.0,
-            clip_skip=2,
-            width=600,
-            height=800,
+            guidance_scale=8.5,  # strong guidance for realistic humans
+            clip_skip=1,  # full text encoder for anatomical accuracy
+            width=512,
+            height=768,  # increased for better full-body proportions
             generator=generator,
+            callback_on_step_end=callback_on_step_end,
         ).images[0]
-    # Move back to CPU and free VRAM for Ollama
-    if device == "cuda":
-        sd.to("cpu")
-        sd_on_gpu = False
-        torch.cuda.empty_cache()
-        print("[SD] Returned to CPU, VRAM freed")
     return result
 
-async def generate_image(prompt: str, steps: int = 45) -> str:
+async def generate_image(prompt: str, request_id: str, steps: int = 60) -> str:
     loop = asyncio.get_running_loop()
-    img  = await loop.run_in_executor(None, partial(_run_sd, prompt, steps))
+    img  = await loop.run_in_executor(None, partial(_run_sd, prompt, request_id, steps, -1, 1))
+    gen_progress[request_id] = {"progress": 100, "type": "image"}
     path = os.path.join(IMAGE_FOLDER, f"{uuid.uuid4()}.png")
     img.save(path)
     return os.path.relpath(path, ROOT).replace("\\", "/")
@@ -184,35 +213,38 @@ async def generate_image(prompt: str, steps: int = 45) -> str:
 # same general composition and feel like a smooth loop.
 GIF_SEEDS = [42, 43, 44, 45]  # close seeds = similar composition per frame
 
-def _run_gif(prompt: str) -> str:
-    global sd_on_gpu
-    if device == "cuda" and not sd_on_gpu:
-        sd.to("cuda")
-        sd_on_gpu = True
-        print("[SD] Moved to GPU for GIF")
+def _run_gif(prompt: str, request_id: str) -> str:
+    # SD remains on GPU full-time for faster generation
     frames = []
     with torch.inference_mode():
-        for seed in GIF_SEEDS:
+        for frame_idx, seed in enumerate(GIF_SEEDS):
             generator = torch.Generator(device=device).manual_seed(seed)
+
+            # Progress callback
+            def callback_on_step_end(pipe, step_idx, timestep, callback_kwargs):
+                # Each frame is ~25%, scale by frame and step
+                step_progress = (step_idx + 1) / 45  # GIF uses 45 steps
+                frame_progress = (frame_idx + step_progress) / len(GIF_SEEDS)
+                gen_progress[request_id] = {
+                    "progress": min(99, int(frame_progress * 100)),
+                    "type": "gif"
+                }
+                return callback_kwargs
+
             img = sd(
                 prompt,
                 negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=45,
-                guidance_scale=7.0,
-                clip_skip=2,
+                num_inference_steps=45,  # slightly lower for GIF speed
+                guidance_scale=8.5,  # strong guidance for realistic humans
+                clip_skip=1,  # full text encoder for anatomical accuracy
                 width=256,
-                height=256,
+                height=320,  # increased for better proportions
                 generator=generator,
+                callback_on_step_end=callback_on_step_end,
             ).images[0]
             frames.append(img)
 
-    # Move back to CPU and free VRAM
-    if device == "cuda":
-        sd.to("cpu")
-        sd_on_gpu = False
-        torch.cuda.empty_cache()
-        print("[SD] Returned to CPU, VRAM freed")
-
+    gen_progress[request_id] = {"progress": 100, "type": "gif"}
     loop_frames = frames + frames[-2:0:-1]
     filename = f"{uuid.uuid4()}.gif"
     out_path = os.path.join(GIF_FOLDER, filename)
@@ -226,9 +258,9 @@ def _run_gif(prompt: str) -> str:
     )
     return f"media/gifs/{filename}"
 
-async def generate_gif(prompt: str) -> str:
+async def generate_gif(prompt: str, request_id: str) -> str:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, partial(_run_gif, prompt))
+    return await loop.run_in_executor(None, partial(_run_gif, prompt, request_id))
 
 # ---------------- OLLAMA ----------------
 def _ollama_sync(prompt: str) -> str:
@@ -316,6 +348,13 @@ async def health():
     }
 
 
+@app.get("/progress/{request_id}")
+async def get_progress(request_id: str):
+    """Get generation progress for image/GIF."""
+    if request_id in gen_progress:
+        return gen_progress[request_id]
+    return {"progress": 0, "type": "unknown"}
+
 @app.post("/chat")
 async def chat(data: ChatRequest):
     global chat_history, avatar_prompt, personality, outfit
@@ -323,6 +362,9 @@ async def chat(data: ChatRequest):
     user_message = data.message.strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    # Generate unique request ID for progress tracking
+    request_id = str(uuid.uuid4())
 
     # GIF keywords → map to clean motion word for prompt
     gif_keyword_map = {
@@ -345,8 +387,8 @@ async def chat(data: ChatRequest):
             return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "gif": None}
         try:
             prompt   = build_realistic_prompt(avatar_prompt, f"{matched_motion} in {outfit.lower()}")
-            rel_path = await generate_gif(prompt)
-            return {"reply": "Here's me in action!", "gif": f"{BASE_URL}/{rel_path}"}
+            rel_path = await generate_gif(prompt, request_id)
+            return {"reply": "Here's me in action!", "gif": f"{BASE_URL}/{rel_path}", "request_id": request_id}
         except Exception as e:
             print(f"[GIF error] {e}")
             return {"reply": "Hmm, something went wrong with that animation. Try again?", "gif": None}
@@ -362,8 +404,8 @@ async def chat(data: ChatRequest):
             user_context = user_context.replace(kw, "").strip()
         extra = f"in {outfit.lower()}, {user_context}" if user_context else f"in {outfit.lower()}"
         prompt   = build_realistic_prompt(avatar_prompt, extra)
-        rel_path = await generate_image(prompt)
-        return {"reply": "Here you go!", "image": f"{BASE_URL}/{rel_path}"}
+        rel_path = await generate_image(prompt, request_id)
+        return {"reply": "Here you go!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
 
     # Text chat
     chat_history.append(f"User: {user_message}")
@@ -398,15 +440,16 @@ async def set_avatar(data: AvatarRequest):
     if not avatar_prompt:
         raise HTTPException(status_code=400, detail="Avatar prompt cannot be empty.")
 
+    request_id = str(uuid.uuid4())
     outfit_text = outfit.lower() if outfit else "casual clothes"
     prompt   = build_realistic_prompt(
         avatar_prompt,
         f"in {outfit_text}",
         background="avatar"
     )
-    rel_path = await generate_image(prompt, steps=45)
+    rel_path = await generate_image(prompt, request_id, steps=60)
     shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
-    return {"avatar": f"{BASE_URL}/media/avatar.png"}
+    return {"avatar": f"{BASE_URL}/media/avatar.png", "request_id": request_id}
 
 
 @app.post("/changeoutfit")
@@ -416,9 +459,10 @@ async def change_outfit(data: OutfitRequest):
     if not outfit:
         raise HTTPException(status_code=400, detail="Outfit cannot be empty.")
 
+    request_id = str(uuid.uuid4())
     prompt   = build_realistic_prompt(avatar_prompt, f"in {outfit.lower()}", background="plain")
-    rel_path = await generate_image(prompt)
-    return {"reply": f"All dressed up in {outfit}!", "image": f"{BASE_URL}/{rel_path}"}
+    rel_path = await generate_image(prompt, request_id)
+    return {"reply": f"All dressed up in {outfit}!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
 
 
 @app.post("/setpersonality")

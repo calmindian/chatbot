@@ -635,6 +635,7 @@ export default function App() {
   const [isTyping,  setIsTyping]  = useState(false);
   const [isGenImg,  setIsGenImg]  = useState(false);
   const [isGenGif,  setIsGenGif]  = useState(false);
+  const [genProgress, setGenProgress] = useState(0);  // 0-100
 
   // lightbox
   const [lightbox, setLightbox] = useState(null);
@@ -656,7 +657,7 @@ export default function App() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping, isGenImg, isGenGif]);
+  }, [messages, isTyping, isGenImg, isGenGif, genProgress]);
 
   // Check server connectivity on mount and periodically.
   // Uses native fetch + AbortController instead of axios — axios timeout is
@@ -727,6 +728,24 @@ export default function App() {
       const res = await api.post('/setavatar', { prompt: avatarPrompt });
       const imageUrl = res.data.avatar ? res.data.avatar : `${API_BASE}/media/avatar.png`;
       setAvatarSrc(`${imageUrl}?t=${Date.now()}`);
+
+      // Poll progress if available
+      if (res.data.request_id) {
+        let progressInterval = setInterval(async () => {
+          try {
+            const progRes = await api.get(`/progress/${res.data.request_id}`);
+            const prog = progRes.data.progress || 0;
+            setGenProgress(prog);
+            if (prog >= 100) {
+              clearInterval(progressInterval);
+              setGenProgress(0);
+            }
+          } catch (e) {
+            console.log('Progress poll error:', e);
+          }
+        }, 200);
+      }
+
       showInfo('Avatar updated ✨');
       setSidebarOpen(false);
     } catch { showError('Failed to create avatar.'); }
@@ -741,6 +760,24 @@ export default function App() {
       const res = await api.post('/changeoutfit', { outfit });
       const imageUrl = res.data.image ? `${res.data.image}?t=${Date.now()}` : null;
       addMessage('ai', res.data.reply, imageUrl);
+
+      // Poll progress if available
+      if (res.data.request_id) {
+        let progressInterval = setInterval(async () => {
+          try {
+            const progRes = await api.get(`/progress/${res.data.request_id}`);
+            const prog = progRes.data.progress || 0;
+            setGenProgress(prog);
+            if (prog >= 100) {
+              clearInterval(progressInterval);
+              setGenProgress(0);
+            }
+          } catch (e) {
+            console.log('Progress poll error:', e);
+          }
+        }, 200);
+      }
+
       setSidebarOpen(false);
     } catch { showError('Failed to change outfit.'); }
     finally  { setLoadingOutfit(false); }
@@ -793,14 +830,33 @@ export default function App() {
       setIsTyping(false);
       setIsGenImg(false);
       setIsGenGif(false);
+      setGenProgress(0);
       const imageUrl = res.data.image ? `${res.data.image}?t=${Date.now()}` : null;
       const gifUrl = res.data.gif ? `${res.data.gif}?t=${Date.now()}` : null;
       addMessage('ai', res.data.reply, imageUrl, gifUrl);
       speakText(res.data.reply);
+
+      // Poll progress if generation happened
+      if (res.data.request_id && (willGenGif || willGenImage)) {
+        const progressInterval = setInterval(async () => {
+          try {
+            const progRes = await api.get(`/progress/${res.data.request_id}`);
+            const prog = progRes.data.progress || 0;
+            setGenProgress(prog);
+            if (prog >= 100) {
+              clearInterval(progressInterval);
+              setGenProgress(0);
+            }
+          } catch (e) {
+            console.log('Progress poll error:', e);
+          }
+        }, 200);  // Poll every 200ms for smooth updates
+      }
     } catch {
       setIsTyping(false);
       setIsGenImg(false);
       setIsGenGif(false);
+      setGenProgress(0);
       showError('Failed to get a reply. Is the server running?');
     } finally {
       setLoadingChat(false);
@@ -1093,16 +1149,50 @@ export default function App() {
             {/* Image generation indicator */}
             {isGenImg && (
               <div className="gen-bubble">
-                <CircularProgress size={16} style={{color:'var(--accent)'}} />
-                Generating image — this takes ~30 sec…
+                <div style={{display:'flex',alignItems:'center',gap:12}}>
+                  <div style={{position:'relative',width:40,height:40}}>
+                    <CircularProgress
+                      variant="determinate"
+                      value={genProgress}
+                      size={40}
+                      style={{color:'var(--accent)'}}
+                    />
+                    <div style={{
+                      position:'absolute',
+                      top:0,left:0,right:0,bottom:0,
+                      display:'flex',alignItems:'center',justifyContent:'center',
+                      fontSize:12,fontWeight:600,color:'var(--text-primary)'
+                    }}>
+                      {genProgress}%
+                    </div>
+                  </div>
+                  <span>Generating image…</span>
+                </div>
               </div>
             )}
 
             {/* GIF generation indicator */}
             {isGenGif && (
               <div className="gen-bubble">
-                <CircularProgress size={16} style={{color:'var(--accent)'}} />
-                Generating GIF — this takes ~60 sec…
+                <div style={{display:'flex',alignItems:'center',gap:12}}>
+                  <div style={{position:'relative',width:40,height:40}}>
+                    <CircularProgress
+                      variant="determinate"
+                      value={genProgress}
+                      size={40}
+                      style={{color:'var(--accent)'}}
+                    />
+                    <div style={{
+                      position:'absolute',
+                      top:0,left:0,right:0,bottom:0,
+                      display:'flex',alignItems:'center',justifyContent:'center',
+                      fontSize:12,fontWeight:600,color:'var(--text-primary)'
+                    }}>
+                      {genProgress}%
+                    </div>
+                  </div>
+                  <span>Generating GIF…</span>
+                </div>
               </div>
             )}
 
