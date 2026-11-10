@@ -21,7 +21,7 @@ services:
       BASE_URL: http://localhost:8000
       OLLAMA_URL: http://ollama:11434/api/generate
       MODEL_NAME: mistral:latest
-      SD_PATH: models/dreamshaper
+      SD_PATH: models/realistic
       VAE_PATH: models/vae
       DATA_DIR: /app/data
     volumes:
