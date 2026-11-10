@@ -163,6 +163,11 @@ const css = `
     color: #fff;
   }
   .avatar-wrap:hover .wa-avatar-edit { opacity: 1; }
+  button.avatar-wrap {
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
 
   .wa-sidebar-title {
     font-size: 18px;
@@ -522,7 +527,10 @@ const css = `
     position: fixed;
     inset: 0;
     background: rgba(0,0,0,.6);
+    border: 0;
+    padding: 0;
     z-index: 9;
+    cursor: default;
   }
 
   /* ── Image lightbox ────────────────────────────────────────── */
@@ -603,6 +611,347 @@ const css = `
   @media (min-width: 769px) {
     .menu-btn { display: none !important; }
   }
+
+  /* ── Refined visual system ────────────────────────────────── */
+  :root {
+    --bg-deep: #0c1217;
+    --bg-sidebar: #111a20;
+    --bg-header: #152129;
+    --bg-input: #202e37;
+    --bg-user-msg: #087c68;
+    --bg-ai-msg: #18252d;
+    --bg-panel: #131e25;
+    --accent: #39d6ad;
+    --accent-hover: #5ce5bf;
+    --text-primary: #eef5f2;
+    --text-secondary: #9aabb1;
+    --text-time: #a4b5ba;
+    --border: rgba(195, 220, 220, .12);
+    --divider: rgba(195, 220, 220, .09);
+    --sidebar-w: 344px;
+    --header-h: 68px;
+    --input-h: 76px;
+    --radius-msg: 15px;
+    --shadow: 0 8px 24px rgba(0, 0, 0, .18);
+  }
+
+  html, body, #root { min-height: 100%; }
+  body { overscroll-behavior: none; }
+  button, textarea, input, select { font: inherit; }
+  button { -webkit-tap-highlight-color: transparent; }
+
+  .wa-shell {
+    background:
+      radial-gradient(ellipse at 74% 5%, rgba(33, 99, 85, .12), transparent 34%),
+      var(--bg-deep);
+  }
+
+  .wa-sidebar {
+    background: linear-gradient(180deg, #121e25 0%, #10191f 100%);
+    border-right-color: var(--border);
+  }
+
+  .wa-sidebar-header {
+    height: 76px;
+    padding: 0 22px;
+    background: transparent;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .wa-avatar {
+    width: 44px;
+    height: 44px;
+    border: 2px solid rgba(57, 214, 173, .35);
+  }
+
+  .wa-sidebar-title { font-size: 17px; letter-spacing: -.2px; }
+
+  .wa-sidebar-body {
+    padding: 12px 0 max(18px, env(safe-area-inset-bottom));
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .status-row {
+    margin: 4px 16px 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, .025);
+    font-size: 12px;
+  }
+
+  .status-dot { box-shadow: 0 0 10px currentColor; }
+
+  .panel-section {
+    margin: 9px 14px;
+    padding: 15px;
+    border: 1px solid var(--divider);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, .025);
+  }
+
+  .panel-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 12px;
+    color: #b4c7c9;
+    font-size: 11px;
+    letter-spacing: 1px;
+  }
+
+  .wa-input {
+    min-height: 44px;
+    padding: 11px 13px;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    background: #1b2931;
+    line-height: 1.45;
+  }
+
+  .wa-input:focus { border-color: rgba(57, 214, 173, .55); }
+
+  .wa-btn {
+    min-height: 44px;
+    margin-top: 10px;
+    border-radius: 11px;
+    color: #06251e;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .wa-btn.secondary {
+    border: 1px solid var(--border);
+    background: #1b2931;
+    color: var(--text-primary);
+  }
+
+  .wa-btn.secondary:hover:not(:disabled) { background: #253640; }
+  .avatar-help {
+    margin-top: 9px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .wa-chat-header {
+    height: var(--header-h);
+    padding: 0 24px;
+    border-bottom: 1px solid var(--divider);
+    background: rgba(18, 29, 36, .94);
+    box-shadow: none;
+    backdrop-filter: blur(16px);
+  }
+
+  .chat-header-name { font-size: 15px; letter-spacing: -.15px; }
+  .chat-header-status { font-size: 12px; }
+  .chat-header-status:not(.typing) { color: #7e969b; }
+  .chat-header-status.typing { color: var(--accent); }
+
+  .wa-chat::before {
+    background-image:
+      radial-gradient(circle at 1px 1px, rgba(184, 225, 214, .035) 1px, transparent 0);
+    background-size: 28px 28px;
+  }
+
+  .wa-messages {
+    min-height: 0;
+    padding: 24px clamp(16px, 5vw, 72px);
+    gap: 4px;
+    overscroll-behavior: contain;
+  }
+
+  .msg-row { max-width: min(68%, 680px); margin-top: 4px; }
+  .msg-row.image-msg { max-width: min(76%, 520px); }
+
+  .msg-bubble {
+    padding: 10px 14px 8px;
+    border: 1px solid rgba(255, 255, 255, .035);
+    border-radius: var(--radius-msg);
+    line-height: 1.55;
+    box-shadow: 0 5px 16px rgba(0, 0, 0, .14);
+  }
+
+  .msg-row.user .msg-bubble {
+    background: linear-gradient(145deg, #0b806b, #086b5b);
+    border-color: rgba(120, 236, 201, .12);
+    border-bottom-right-radius: 5px;
+  }
+
+  .msg-row.ai .msg-bubble {
+    background: #18252d;
+    border-bottom-left-radius: 5px;
+  }
+
+  .msg-image { max-height: 62vh; }
+
+  .date-pill {
+    margin: 4px 0 18px;
+    padding: 6px 13px;
+    border: 1px solid var(--border);
+    background: rgba(22, 35, 42, .88);
+    color: #a7b8ba;
+    font-size: 11px;
+    letter-spacing: .2px;
+  }
+
+  .empty-chat {
+    width: min(100%, 560px);
+    min-height: 100%;
+    align-self: center;
+    padding: 28px 10px;
+    gap: 14px;
+    text-align: center;
+  }
+
+  .empty-icon {
+    width: 76px;
+    height: 76px;
+    border: 1px solid rgba(57, 214, 173, .18);
+    background: linear-gradient(145deg, rgba(57, 214, 173, .16), rgba(57, 214, 173, .04));
+    color: var(--accent);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, .2);
+  }
+
+  .empty-title {
+    color: var(--text-primary);
+    font-size: clamp(20px, 3vw, 26px);
+    font-weight: 650;
+    letter-spacing: -.55px;
+  }
+
+  .empty-subtitle {
+    max-width: 340px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .starter-prompts {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 9px;
+    margin-top: 8px;
+  }
+
+  .starter-prompt {
+    min-height: 40px;
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .035);
+    color: #d3e2df;
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color .16s, background .16s, transform .16s;
+  }
+
+  .starter-prompt:hover {
+    transform: translateY(-1px);
+    border-color: rgba(57, 214, 173, .48);
+    background: rgba(57, 214, 173, .08);
+  }
+
+  .wa-input-bar {
+    min-height: var(--input-h);
+    height: auto;
+    padding: 12px 24px max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--divider);
+    background: rgba(18, 29, 36, .96);
+    backdrop-filter: blur(16px);
+  }
+
+  .wa-chat-input {
+    min-height: 46px;
+    padding: 12px 18px;
+    border: 1px solid transparent;
+    background: #202e37;
+    line-height: 1.45;
+  }
+
+  .wa-chat-input:focus { box-shadow: 0 0 0 1px rgba(57, 214, 173, .55); }
+
+  .send-btn {
+    width: 46px;
+    height: 46px;
+    background: linear-gradient(145deg, #48dfb6, #28b992);
+    color: #06251e;
+    box-shadow: 0 5px 15px rgba(37, 193, 149, .18);
+  }
+
+  .menu-btn {
+    min-width: 42px;
+    min-height: 42px;
+    align-items: center;
+    justify-content: center;
+    color: #c3d2d3;
+  }
+
+  .menu-btn:hover { background: rgba(255, 255, 255, .06); }
+
+  .settings-close {
+    display: none;
+    width: 42px;
+    height: 42px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .lightbox { padding: max(16px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom)); }
+  .lightbox img { max-width: 96vw; max-height: 88dvh; object-fit: contain; }
+  .lightbox-close { top: max(14px, env(safe-area-inset-top)); right: 14px; }
+
+  @media (max-width: 768px) {
+    .wa-sidebar {
+      top: 0;
+      bottom: 0;
+      width: min(88vw, 370px);
+      min-width: 0;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      border-right: 1px solid var(--border);
+      box-shadow: none;
+    }
+
+    .wa-sidebar.open { box-shadow: 14px 0 38px rgba(0, 0, 0, .42); }
+    .wa-sidebar-header { height: 68px; padding: 0 18px; }
+    .settings-close { display: flex; margin-left: auto; }
+    .settings-close:hover { background: rgba(255, 255, 255, .06); }
+    .wa-chat-header { gap: 8px; padding: 0 12px; }
+    .wa-chat-header .wa-avatar { width: 40px; height: 40px; }
+    .wa-messages { padding: 16px 12px 20px; }
+    .msg-row, .msg-row.image-msg { max-width: min(88%, 520px); }
+    .msg-bubble { font-size: 14px; }
+    .msg-image { max-height: 52dvh; object-fit: contain; }
+    .wa-input-bar {
+      gap: 8px;
+      padding: 9px 12px max(9px, env(safe-area-inset-bottom));
+    }
+    .wa-chat-input { min-width: 0; min-height: 46px; padding: 11px 15px; font-size: 16px; }
+    .send-btn { width: 46px; height: 46px; }
+    .empty-chat { padding: 20px 4px; }
+    .empty-icon { width: 64px; height: 64px; }
+    .starter-prompts { gap: 8px; }
+    .starter-prompt { min-height: 42px; }
+  }
+
+  @media (max-width: 380px) {
+    .wa-chat-header { padding: 0 8px; }
+    .chat-header-status { font-size: 11px; }
+    .wa-messages { padding-right: 9px; padding-left: 9px; }
+    .msg-row, .msg-row.image-msg { max-width: 92%; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
 `;
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -633,6 +982,7 @@ export default function App() {
 
   // loading per action
   const [loadingAvatar,      setLoadingAvatar]      = useState(false);
+  const [uploadingAvatar,    setUploadingAvatar]    = useState(false);
   const [loadingOutfit,      setLoadingOutfit]       = useState(false);
   const [loadingPersonality, setLoadingPersonality]  = useState(false);
   const [loadingChat,        setLoadingChat]         = useState(false);
@@ -759,6 +1109,39 @@ export default function App() {
       setSidebarOpen(false);
     } catch { showError('Failed to create avatar.'); }
     finally  { setLoadingAvatar(false); }
+  };
+
+  const handleUploadAvatar = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const supportedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!supportedTypes.includes(file.type)) {
+      showError('Choose a JPEG, PNG, or WebP picture.');
+      event.target.value = '';
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      showError('Choose a picture that is 10 MB or smaller.');
+      event.target.value = '';
+      return;
+    }
+
+    setUploadingAvatar(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('session_id', getSessionId());
+    try {
+      const res = await api.post('/uploadavatar', formData);
+      setAvatarSrc(`${res.data.avatar}?t=${Date.now()}`);
+      showInfo('Your picture is now the avatar ✨');
+      setSidebarOpen(false);
+    } catch (error) {
+      showError(error.response?.data?.detail || 'Could not upload this picture.');
+    } finally {
+      setUploadingAvatar(false);
+      event.target.value = '';
+    }
   };
 
   // ── Outfit ─────────────────────────────────────────────────
@@ -903,23 +1286,38 @@ export default function App() {
       <div className="wa-shell">
 
         {/* ── Sidebar overlay (mobile) ────────────────────── */}
-        <div
+        <button
+          type="button"
           className={`sidebar-overlay ${sidebarOpen ? 'open' : ''}`}
+          aria-label="Close settings"
           onClick={() => setSidebarOpen(false)}
         />
 
         {/* ── Sidebar ─────────────────────────────────────── */}
-        <aside className={`wa-sidebar ${sidebarOpen ? 'open' : ''}`}>
+        <aside id="settings-drawer" className={`wa-sidebar ${sidebarOpen ? 'open' : ''}`} aria-label="Friend settings">
 
           {/* Header */}
           <div className="wa-sidebar-header">
-            <div className="avatar-wrap" onClick={() => fileInputRef.current?.click()}>
+            <button
+              className="avatar-wrap"
+              type="button"
+              aria-label="Upload an avatar picture"
+              onClick={() => fileInputRef.current?.click()}
+            >
               <img className="wa-avatar" src={avatarSrc} alt="avatar"
                 onError={e => { e.target.src = `https://ui-avatars.com/api/?name=AI&background=005c4b&color=fff`; }}
               />
               <div className="wa-avatar-edit"><Icon.Camera /></div>
-            </div>
+            </button>
             <span className="wa-sidebar-title">AI Friend</span>
+            <button
+              className="settings-close"
+              type="button"
+              aria-label="Close settings"
+              onClick={() => setSidebarOpen(false)}
+            >
+              <Icon.Close />
+            </button>
           </div>
 
           <div className="wa-sidebar-body">
@@ -942,10 +1340,30 @@ export default function App() {
                 value={avatarPrompt}
                 onChange={e => setAvatarPrompt(e.target.value)}
               />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleUploadAvatar}
+                style={{display: 'none'}}
+                aria-label="Choose an avatar picture"
+              />
+              <button
+                className="wa-btn secondary"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingAvatar || loadingAvatar}
+              >
+                {uploadingAvatar
+                  ? <><CircularProgress size={14} color="inherit" /> Uploading…</>
+                  : <><Icon.Image /> Upload a picture</>
+                }
+              </button>
+              <div className="avatar-help">JPEG, PNG, or WebP · up to 10 MB. Your picture is used directly as the avatar.</div>
               <button
                 className="wa-btn"
                 onClick={handleSetAvatar}
-                disabled={loadingAvatar}
+                disabled={loadingAvatar || uploadingAvatar}
               >
                 {loadingAvatar
                   ? <><CircularProgress size={14} color="inherit" /> Creating…</>
@@ -1069,7 +1487,13 @@ export default function App() {
 
           {/* Chat header */}
           <div className="wa-chat-header">
-            <button className="menu-btn" onClick={() => setSidebarOpen(o => !o)}>
+            <button
+              className="menu-btn"
+              onClick={() => setSidebarOpen(o => !o)}
+              aria-label={sidebarOpen ? 'Close settings' : 'Open settings'}
+              aria-expanded={sidebarOpen}
+              aria-controls="settings-drawer"
+            >
               {sidebarOpen ? <Icon.Close /> : <Icon.Menu />}
             </button>
             <img
@@ -1099,8 +1523,23 @@ export default function App() {
                     <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/>
                   </svg>
                 </div>
-                <span>Say hello to your AI Friend 👋</span>
-                <span style={{fontSize:12, opacity:.6}}>Configure your friend in the settings panel</span>
+                <span className="empty-title">A little space to connect.</span>
+                <span className="empty-subtitle">Say hello or share what’s on your mind. Create an avatar in settings to unlock portraits.</span>
+                <div className="starter-prompts" aria-label="Conversation starters">
+                  {['Hey, how are you?', 'Tell me something fun', 'What can you do?'].map(prompt => (
+                    <button
+                      className="starter-prompt"
+                      key={prompt}
+                      type="button"
+                      onClick={() => {
+                        setMessage(prompt);
+                        inputRef.current?.focus();
+                      }}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 

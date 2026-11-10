@@ -8,6 +8,12 @@ services:
     # (avoids a clash if Ollama for Windows is also running on 11434).
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
     deploy:
       resources:
         reservations:
@@ -19,14 +25,15 @@ services:
 
   ollama-model-init:
     image: ollama/ollama:latest
-    depends_on:
-      - ollama
+    entrypoint: ["/bin/ollama"]
+    command: ["pull", "mistral:latest"]
     environment:
       OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/sh", "-c"]
-    command: "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull mistral:latest"
     volumes:
       - ollama_data:/root/.ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
     restart: "no"
 
   model-init:

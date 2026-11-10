@@ -1,4 +1,5 @@
 import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import uuid
 import requests
 import torch
@@ -7,9 +8,10 @@ import asyncio
 import shutil
 import threading
 import numpy as np
-from PIL import Image
+from io import BytesIO
+from PIL import Image, ImageOps, UnidentifiedImageError
 from functools import partial
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -40,10 +42,13 @@ MAX_INPUT_CHARS = 1000
 MAX_PROMPT_CHARS = 300
 MAX_OUTFIT_CHARS = 120
 MAX_PERSONALITY_CHARS = 80
-IMAGE_WIDTH = 576
-IMAGE_HEIGHT = 1024
-GIF_WIDTH = 432
-GIF_HEIGHT = 768
+MAX_AVATAR_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_AVATAR_PIXELS = 25_000_000
+LOW_VRAM = torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 6 * 1024**3
+IMAGE_WIDTH = 504 if LOW_VRAM else 576
+IMAGE_HEIGHT = 896 if LOW_VRAM else 1024
+GIF_WIDTH = 360 if LOW_VRAM else 432
+GIF_HEIGHT = 640 if LOW_VRAM else 768
 DATA_DIR = os.path.normpath(os.getenv("DATA_DIR", ROOT))
 HISTORY_DIR = os.path.join(DATA_DIR, "chat_sessions")
 DEFAULT_SESSION_ID = "default"
@@ -89,7 +94,11 @@ sd.scheduler = DPMSolverMultistepScheduler.from_config(
     use_karras_sigmas=True,
 )
 sd.enable_attention_slicing()
+sd.enable_vae_slicing()
 if device == "cuda":
+    if LOW_VRAM:
+        print("[SD] Low-VRAM mode enabled for smaller portrait generation")
+        sd.enable_model_cpu_offload()
     try:
         sd.enable_xformers_memory_efficient_attention()
         print("[SD] xFormers enabled for better quality")
@@ -218,25 +227,49 @@ def _run_sd(prompt: str, request_id: str, steps: int = 30, seed: int = -1, total
         return callback_kwargs
 
     # DreamShaper: optimized for photorealistic humans, good color & detail
-    # 60 steps balances quality + speed
+    # Keep the generation budget modest on low-VRAM GPUs while preserving the 9:16 portrait format.
     generator = None
     if seed >= 0:
         generator = torch.Generator(device=device).manual_seed(seed)
-    with torch.inference_mode():
-        result = sd(
-            prompt,
-            negative_prompt=NEGATIVE_PROMPT,
-            num_inference_steps=steps,
-            guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
-            clip_skip=1,  # full text encoder for anatomical accuracy
-            width=IMAGE_WIDTH,
-            height=IMAGE_HEIGHT,  # 9:16 portrait composition for full-body avatar framing
-            generator=generator,
-            callback_on_step_end=callback_on_step_end,
-        ).images[0]
-    return result
+    try:
+        with torch.inference_mode():
+            result = sd(
+                prompt,
+                negative_prompt=NEGATIVE_PROMPT,
+                num_inference_steps=max(10, min(steps, 20 if LOW_VRAM else 30)),
+                guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
+                clip_skip=1,  # full text encoder for anatomical accuracy
+                width=IMAGE_WIDTH,
+                height=IMAGE_HEIGHT,  # 9:16 portrait composition for full-body avatar framing
+                generator=generator,
+                callback_on_step_end=callback_on_step_end,
+            ).images[0]
+        return result
+    except RuntimeError as e:
+        if device == "cuda" and "out of memory" in str(e).lower():
+            print(f"[SD] CUDA OOM, retrying on CPU with reduced settings: {e}")
+            sd.to("cpu")
+            torch.cuda.empty_cache()
+            with torch.inference_mode():
+                fallback_generator = None
+                if seed >= 0:
+                    fallback_generator = torch.Generator(device="cpu").manual_seed(seed)
+                result = sd(
+                    prompt,
+                    negative_prompt=NEGATIVE_PROMPT,
+                    num_inference_steps=max(10, min(steps, 14)),
+                    guidance_scale=6.0,
+                    clip_skip=1,
+                    width=504,
+                    height=896,
+                    generator=fallback_generator,
+                    callback_on_step_end=callback_on_step_end,
+                ).images[0]
+            sd.to(device)
+            return result
+        raise
 
-async def generate_image(prompt: str, request_id: str, steps: int = 30) -> str:
+async def generate_image(prompt: str, request_id: str, steps: int = 20 if LOW_VRAM else 30) -> str:
     loop = asyncio.get_running_loop()
     img  = await loop.run_in_executor(None, partial(_run_sd, prompt, request_id, steps, -1, 1))
     gen_progress[request_id] = {"progress": 100, "type": "image"}
@@ -275,7 +308,7 @@ def _run_gif(prompt: str, request_id: str) -> str:
             img = sd(
                 prompt,
                 negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=25,  # lower for GIF speed
+                num_inference_steps=18 if LOW_VRAM else 25,  # lower for GIF speed on constrained GPUs
                 guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
                 clip_skip=1,  # full text encoder for anatomical accuracy
                 width=GIF_WIDTH,
@@ -506,9 +539,53 @@ async def set_avatar(request: Request, data: AvatarRequest):
         f"in {outfit_text}",
         background="avatar"
     )
-    rel_path = await generate_image(prompt, request_id, steps=30)
+    rel_path = await generate_image(prompt, request_id, steps=20 if LOW_VRAM else 30)
     shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
     return {"avatar": media_url_for(request, "media/avatar.png"), "request_id": request_id}
+
+
+@app.post("/uploadavatar")
+async def upload_avatar(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+):
+    content = await file.read(MAX_AVATAR_UPLOAD_BYTES + 1)
+    await file.close()
+    if not content:
+        raise HTTPException(status_code=400, detail="Choose an image to upload.")
+    if len(content) > MAX_AVATAR_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller.")
+
+    try:
+        with Image.open(BytesIO(content)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise HTTPException(status_code=400, detail="Upload a JPEG, PNG, or WebP image.")
+            if image.width * image.height > MAX_AVATAR_PIXELS:
+                raise HTTPException(status_code=400, detail="Image dimensions are too large.")
+            image.verify()
+
+        with Image.open(BytesIO(content)) as image:
+            avatar = ImageOps.exif_transpose(image).convert("RGB")
+            output = BytesIO()
+            avatar.save(output, format="PNG", optimize=True)
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=400, detail="The uploaded file is not a valid supported image.") from exc
+
+    avatar_path = os.path.join(MEDIA_FOLDER, "avatar.png")
+    temporary_path = f"{avatar_path}.{uuid.uuid4()}.tmp"
+    try:
+        with open(temporary_path, "wb") as avatar_file:
+            avatar_file.write(output.getvalue())
+        os.replace(temporary_path, avatar_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+    get_session_state(session_id)
+    return {"avatar": media_url_for(request, "media/avatar.png")}
 
 
 @app.post("/changeoutfit")
