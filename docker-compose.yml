@@ -1,11 +1,4 @@
-# AI Friend -- run everything in Docker (Windows: Docker Desktop + WSL2 + NVIDIA driver)
-#
-# First run:
-#   1) docker compose up -d ollama
-#   2) docker compose exec ollama ollama pull mistral:latest
-#   3) docker compose run --rm backend python download_models.py   (skip if ./models already filled)
-#   4) docker compose up -d --build
-#   5) open http://localhost:3000
+# First startup downloads the Stable Diffusion/VAE and Ollama models.
 
 services:
   ollama:
@@ -24,24 +17,43 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  ollama-model-init:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: "until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull mistral:latest"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  model-init:
+    build: ./backend
+    command: ["python", "download_models.py"]
+    volumes:
+      - models:/app/models
+    restart: "no"
+
   backend:
     build: ./backend
     container_name: ai-friend-backend
     depends_on:
-      - ollama
-    ports:
-      - "8000:8000"
+      ollama-model-init:
+        condition: service_completed_successfully
+      model-init:
+        condition: service_completed_successfully
     environment:
-      BASE_URL: http://localhost:8000          # URL the BROWSER uses to reach the backend
       OLLAMA_URL: http://ollama:11434/api/generate
       MODEL_NAME: mistral:latest
-      SD_PATH: models/dreamshaper
+      SD_PATH: models/realistic
       VAE_PATH: models/vae
-      DATA_DIR: /app/data                      # only used if you apply the 1-line server.py change
+      DATA_DIR: /app/data
     volumes:
-      - ./models:/app/models
-      - ./media:/app/media
-      - ./data:/app/data
+      - models:/app/models
+      - media:/app/media
+      - data:/app/data
     deploy:
       resources:
         reservations:
@@ -51,10 +63,7 @@ services:
               capabilities: [gpu]
 
   frontend:
-    build:
-      context: ./ai-friend
-      args:
-        REACT_APP_API_URL: http://localhost:8000   # baked in at build time
+    build: ./ai-friend
     container_name: ai-friend-frontend
     depends_on:
       - backend
@@ -64,3 +73,6 @@ services:
 
 volumes:
   ollama_data:
+  models:
+  media:
+  data:

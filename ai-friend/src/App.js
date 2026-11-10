@@ -5,7 +5,7 @@ import {
 } from '@mui/material';
 
 // ── API ───────────────────────────────────────────────────────────────────────
-const API_BASE = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000';
+const API_BASE = process.env.REACT_APP_API_URL || '';
 const SESSION_STORAGE_KEY = 'ai-friend-session-id';
 const api = axios.create({ baseURL: API_BASE });
 

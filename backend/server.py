@@ -9,7 +9,7 @@ import threading
 import numpy as np
 from PIL import Image
 from functools import partial
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -28,6 +28,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 ROOT         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_URL     = os.getenv("BASE_URL",   "http://127.0.0.1:8000")
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip()]
 MODEL_NAME   = os.getenv("MODEL_NAME", "mistral:latest")
 SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/dreamshaper")))
 VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
@@ -39,6 +40,10 @@ MAX_INPUT_CHARS = 1000
 MAX_PROMPT_CHARS = 300
 MAX_OUTFIT_CHARS = 120
 MAX_PERSONALITY_CHARS = 80
+IMAGE_WIDTH = 576
+IMAGE_HEIGHT = 1024
+GIF_WIDTH = 432
+GIF_HEIGHT = 768
 DATA_DIR = os.path.normpath(os.getenv("DATA_DIR", ROOT))
 HISTORY_DIR = os.path.join(DATA_DIR, "chat_sessions")
 DEFAULT_SESSION_ID = "default"
@@ -224,8 +229,8 @@ def _run_sd(prompt: str, request_id: str, steps: int = 30, seed: int = -1, total
             num_inference_steps=steps,
             guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
             clip_skip=1,  # full text encoder for anatomical accuracy
-            width=512,
-            height=768,  # increased for better full-body proportions
+            width=IMAGE_WIDTH,
+            height=IMAGE_HEIGHT,  # 9:16 portrait composition for full-body avatar framing
             generator=generator,
             callback_on_step_end=callback_on_step_end,
         ).images[0]
@@ -273,8 +278,8 @@ def _run_gif(prompt: str, request_id: str) -> str:
                 num_inference_steps=25,  # lower for GIF speed
                 guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
                 clip_skip=1,  # full text encoder for anatomical accuracy
-                width=256,
-                height=320,  # increased for better proportions
+                width=GIF_WIDTH,
+                height=GIF_HEIGHT,  # 9:16 portrait aspect ratio for animated avatar clips
                 generator=generator,
                 callback_on_step_end=callback_on_step_end,
             ).images[0]
@@ -335,6 +340,18 @@ def trim_history(history):
     return history
 
 
+def build_public_base_url(request=None) -> str:
+    if request is not None:
+        forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
+        return f"{forwarded_proto}://{forwarded_host}"
+    return BASE_URL
+
+
+def media_url_for(request, relative_path: str) -> str:
+    return f"{build_public_base_url(request)}/{relative_path.lstrip('/')}"
+
+
 def history_file_for(session_id: str | None = None) -> str:
     normalized = normalize_session_id(session_id)
     return os.path.join(HISTORY_DIR, f"{normalized}.json")
@@ -363,9 +380,11 @@ app = FastAPI(title="AI Friend Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+|\[[0-9A-Fa-f:]+\])(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 @app.middleware("http")
@@ -400,7 +419,7 @@ async def get_progress(request_id: str):
     return {"progress": 0, "type": "unknown"}
 
 @app.post("/chat")
-async def chat(data: ChatRequest):
+async def chat(request: Request, data: ChatRequest):
     session = get_session_state(data.session_id)
     user_message = validate_not_blank(data.message, "Message", MAX_INPUT_CHARS)
 
@@ -431,7 +450,7 @@ async def chat(data: ChatRequest):
         try:
             prompt = build_realistic_prompt(avatar_prompt, f"{matched_motion} in {outfit.lower()}")
             rel_path = await generate_gif(prompt, request_id)
-            return {"reply": "Here's me in action!", "gif": f"{BASE_URL}/{rel_path}", "request_id": request_id}
+            return {"reply": "Here's me in action!", "gif": media_url_for(request, rel_path), "request_id": request_id}
         except Exception as e:
             print(f"[GIF error] {e}")
             return {"reply": "Hmm, something went wrong with that animation. Try again?", "gif": None}
@@ -447,7 +466,7 @@ async def chat(data: ChatRequest):
         extra = f"in {outfit.lower()}, {user_context}" if user_context else f"in {outfit.lower()}"
         prompt = build_realistic_prompt(avatar_prompt, extra)
         rel_path = await generate_image(prompt, request_id)
-        return {"reply": "Here you go!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
+        return {"reply": "Here you go!", "image": media_url_for(request, rel_path), "request_id": request_id}
 
     session["chat_history"].append(f"User: {user_message}")
     session["chat_history"] = trim_history(session["chat_history"])
@@ -475,7 +494,7 @@ async def chat(data: ChatRequest):
 
 
 @app.post("/setavatar")
-async def set_avatar(data: AvatarRequest):
+async def set_avatar(request: Request, data: AvatarRequest):
     session = get_session_state(data.session_id)
     avatar_value = validate_not_blank(data.prompt, "Avatar prompt", MAX_PROMPT_CHARS)
     session["avatar_prompt"] = avatar_value
@@ -489,11 +508,11 @@ async def set_avatar(data: AvatarRequest):
     )
     rel_path = await generate_image(prompt, request_id, steps=30)
     shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
-    return {"avatar": f"{BASE_URL}/media/avatar.png", "request_id": request_id}
+    return {"avatar": media_url_for(request, "media/avatar.png"), "request_id": request_id}
 
 
 @app.post("/changeoutfit")
-async def change_outfit(data: OutfitRequest):
+async def change_outfit(request: Request, data: OutfitRequest):
     session = get_session_state(data.session_id)
     outfit_value = validate_not_blank(data.outfit, "Outfit", MAX_OUTFIT_CHARS)
     session["outfit"] = outfit_value
@@ -501,7 +520,7 @@ async def change_outfit(data: OutfitRequest):
     request_id = str(uuid.uuid4())
     prompt = build_realistic_prompt(session["avatar_prompt"], f"in {outfit_value.lower()}", background="plain")
     rel_path = await generate_image(prompt, request_id)
-    return {"reply": f"All dressed up in {outfit_value}!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
+    return {"reply": f"All dressed up in {outfit_value}!", "image": media_url_for(request, rel_path), "request_id": request_id}
 
 
 @app.post("/setpersonality")
