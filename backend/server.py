@@ -65,7 +65,7 @@ sd = StableDiffusionPipeline.from_pretrained(SD_PATH, vae=vae, torch_dtype=dtype
 # Chat (Ollama) will be slower due to shared VRAM, but image generation will be much faster.
 sd = sd.to(device)
 # Optimize for quality: use DPMSolver scheduler (better anatomy/details)
-sd.scheduler = DPMSolverMultistepScheduler.from_config(sd.scheduler.config)
+sd.scheduler = DPMSolverMultistepScheduler.from_config(sd.scheduler.config, use_karras_sigmas=True)
 sd.enable_attention_slicing()
 if device == "cuda":
     try:
@@ -79,42 +79,30 @@ print(f"SD pipeline loaded on {device.upper()} (optimized for anatomy/hand quali
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
-    # eyes specifically
-    "bad eyes, empty eyes, dead eyes, lifeless eyes, "
+    # NOTE: photo words (DSLR, bokeh, studio lighting, 8k, 85mm, professional photography)
+    # were removed from here -- putting them in the negative prompt pushes the model
+    # AWAY from a photographic look.
+    # look / style we do NOT want
+    "cartoon, anime, illustration, painting, drawing, sketch, digital art, "
+    "cgi, 3d render, semi-realistic, airbrushed, smooth skin, plastic skin, waxy skin, "
+    "oversaturated, over-sharpened, "
+    # eyes
+    "bad eyes, empty eyes, dead eyes, deformed iris, deformed pupils, "
     "asymmetrical eyes, cross-eyed, lazy eye, uneven eyes, "
-    "eye looking away, wrong eye direction, "
     # phones / selfie artifacts
-    "phone, smartphone, holding phone, selfie stick, camera in hand, "
-    "selfie, mirror selfie, hand holding phone, phone visible, "
-    # studio / professional look
-    "professional photography, studio lighting, studio background, "
-    "DSLR, Canon, Nikon, Sony, 85mm, 35mm lens, f/1.8, bokeh, "
-    "perfect lighting, dramatic lighting, rim light, "
-    "8k, UHD, ultra high resolution, "
-    # crop / framing defects
-    "cropped, cut off, out of frame, partial body, headshot only, "
-    "close-up only, portrait only, bust only, waist up only, "
+    "phone, smartphone, holding phone, selfie stick, mirror selfie, "
+    # framing defects
+    "cropped, cut off, out of frame, partial body, "
     # face defects
-    "deformed face, disfigured, bad face, ugly face, "
-    "asymmetrical face, poorly drawn face, mutated face, mutation, "
-    "bad teeth, crooked teeth, bad lips, "
-    "double face, cloned face, weird face, squinting, "
-    # body / anatomy defects
+    "deformed face, disfigured, ugly, poorly drawn face, mutated face, mutation, "
+    "bad teeth, double face, cloned face, "
+    # anatomy defects
     "extra fingers, missing fingers, extra limbs, missing limbs, "
     "bad anatomy, bad proportions, deformed body, deformed legs, "
-    "deformed feet, bad feet, missing feet, floating limbs, "
-    "extra arms, extra hands, fused fingers, disconnected limbs, "
-    "unnatural pose, stiff pose, twisted torso, broken bones, "
-    # specific human flaws
-    "distorted human, inhuman, alien features, plastic face, "
-    "soulless, uncanny valley, creepy, "
+    "extra arms, extra hands, fused fingers, too many fingers, long neck, "
     # quality
-    "cartoon, anime, illustration, painting, drawing, sketch, "
-    "blurry, out of focus, soft focus, low quality, low resolution, "
-    "watermark, signature, text, logo, username, "
-    "oversaturated, undersaturated, plastic skin, waxy skin, "
-    "fake, 3d render, cgi, airbrushed, video game, "
-    "worst quality, normal quality, jpeg artifacts, noise, grain"
+    "blurry, out of focus, low quality, low resolution, worst quality, "
+    "jpeg artifacts, watermark, signature, text, logo, username"
 )
 
 # ---------------- GLOBAL STATE ----------------
@@ -141,16 +129,16 @@ def build_realistic_prompt(base: str, extra: str = "", background: str = "natura
     """Build a natural image prompt from base description and context, optimized for humans."""
     # Use quality descriptors that improve human generation
     suffix = (
-        "natural pose, realistic lighting, high quality, sharp focus, "
-        "anatomically correct, professional quality, beautiful skin, "
-        "natural expression, perfect proportions"
+        "RAW photo, candid photograph, natural light, "
+        "detailed skin texture, visible pores, subtle skin imperfections, "
+        "film grain, sharp focus, natural expression, 35mm photo"
     )
 
     # Build context based on background type
     if background == "plain":
         context = "simple, plain white background, clean background"
     elif background == "avatar":
-        context = "clean white background, professional look, portrait quality"
+        context = "plain light grey background, soft natural window light"
     else:
         context = "in a natural everyday setting, natural environment"
 
@@ -158,7 +146,7 @@ def build_realistic_prompt(base: str, extra: str = "", background: str = "natura
     return ", ".join(parts)
 
 # ---------------- STILL IMAGE ----------------
-def _run_sd(prompt: str, request_id: str, steps: int = 60, seed: int = -1, total_frames: int = 1):
+def _run_sd(prompt: str, request_id: str, steps: int = 30, seed: int = -1, total_frames: int = 1):
     # Progress callback for diffusers pipeline
     def callback_on_step_end(pipe, step_idx, timestep, callback_kwargs):
         # For images: step_idx goes 0 to steps-1
@@ -186,7 +174,7 @@ def _run_sd(prompt: str, request_id: str, steps: int = 60, seed: int = -1, total
             prompt,
             negative_prompt=NEGATIVE_PROMPT,
             num_inference_steps=steps,
-            guidance_scale=8.5,  # strong guidance for realistic humans
+            guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
             clip_skip=1,  # full text encoder for anatomical accuracy
             width=512,
             height=768,  # increased for better full-body proportions
@@ -195,7 +183,7 @@ def _run_sd(prompt: str, request_id: str, steps: int = 60, seed: int = -1, total
         ).images[0]
     return result
 
-async def generate_image(prompt: str, request_id: str, steps: int = 60) -> str:
+async def generate_image(prompt: str, request_id: str, steps: int = 30) -> str:
     loop = asyncio.get_running_loop()
     img  = await loop.run_in_executor(None, partial(_run_sd, prompt, request_id, steps, -1, 1))
     gen_progress[request_id] = {"progress": 100, "type": "image"}
@@ -223,7 +211,7 @@ def _run_gif(prompt: str, request_id: str) -> str:
             # Progress callback
             def callback_on_step_end(pipe, step_idx, timestep, callback_kwargs):
                 # Each frame is ~25%, scale by frame and step
-                step_progress = (step_idx + 1) / 45  # GIF uses 45 steps
+                step_progress = (step_idx + 1) / 25  # GIF uses 25 steps
                 frame_progress = (frame_idx + step_progress) / len(GIF_SEEDS)
                 gen_progress[request_id] = {
                     "progress": min(99, int(frame_progress * 100)),
@@ -234,8 +222,8 @@ def _run_gif(prompt: str, request_id: str) -> str:
             img = sd(
                 prompt,
                 negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=45,  # slightly lower for GIF speed
-                guidance_scale=8.5,  # strong guidance for realistic humans
+                num_inference_steps=25,  # lower for GIF speed
+                guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
                 clip_skip=1,  # full text encoder for anatomical accuracy
                 width=256,
                 height=320,  # increased for better proportions
@@ -298,7 +286,7 @@ def trim_history():
     if len(chat_history) > MAX_HISTORY:
         chat_history = chat_history[-MAX_HISTORY:]
 
-HISTORY_FILE = os.path.join(ROOT, "chat_history.json")
+HISTORY_FILE = os.path.join(os.getenv("DATA_DIR", ROOT), "chat_history.json")
 
 def save_chat_history():
     with open(HISTORY_FILE, "w") as f:
@@ -317,10 +305,7 @@ app = FastAPI(title="AI Friend Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://192.168.10.113:3000"
-    ],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -447,7 +432,7 @@ async def set_avatar(data: AvatarRequest):
         f"in {outfit_text}",
         background="avatar"
     )
-    rel_path = await generate_image(prompt, request_id, steps=60)
+    rel_path = await generate_image(prompt, request_id, steps=30)
     shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
     return {"avatar": f"{BASE_URL}/media/avatar.png", "request_id": request_id}
 
