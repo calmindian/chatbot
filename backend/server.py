@@ -5,6 +5,7 @@ import torch
 import json
 import asyncio
 import shutil
+import threading
 import numpy as np
 from PIL import Image
 from functools import partial
@@ -12,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from diffusers import StableDiffusionPipeline, AutoencoderKL, DPMSolverMultistepScheduler
 from dotenv import load_dotenv
 
@@ -34,9 +35,19 @@ MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
 IMAGE_FOLDER = os.path.normpath(os.path.join(ROOT, "media", "images"))
 GIF_FOLDER   = os.path.normpath(os.path.join(ROOT, "media", "gifs"))
 MAX_HISTORY  = 20
+MAX_INPUT_CHARS = 1000
+MAX_PROMPT_CHARS = 300
+MAX_OUTFIT_CHARS = 120
+MAX_PERSONALITY_CHARS = 80
+DATA_DIR = os.path.normpath(os.getenv("DATA_DIR", ROOT))
+HISTORY_DIR = os.path.join(DATA_DIR, "chat_sessions")
+DEFAULT_SESSION_ID = "default"
+state_lock = threading.RLock()
+session_state = {}
 
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 os.makedirs(GIF_FOLDER,   exist_ok=True)
+os.makedirs(HISTORY_DIR, exist_ok=True)
 
 # ---------------- LOAD MODELS ----------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -106,6 +117,33 @@ NEGATIVE_PROMPT = (
 )
 
 # ---------------- GLOBAL STATE ----------------
+def normalize_session_id(session_id: str | None) -> str:
+    raw = (session_id or DEFAULT_SESSION_ID).strip()
+    return raw or DEFAULT_SESSION_ID
+
+
+def get_session_state(session_id: str | None = None):
+    session_key = normalize_session_id(session_id)
+    with state_lock:
+        if session_key not in session_state:
+            session_state[session_key] = {
+                "avatar_prompt": "",
+                "chat_history": [],
+                "personality": "friendly",
+                "outfit": "casual",
+            }
+        return session_state[session_key]
+
+
+def validate_not_blank(value: str, field_name: str, max_len: int):
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail=f"{field_name} cannot be empty.")
+    if len(cleaned) > max_len:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be {max_len} characters or fewer.")
+    return cleaned
+
+
 avatar_prompt: str = ""
 chat_history:  list = []
 personality:   str  = "friendly"
@@ -113,16 +151,20 @@ outfit:        str  = "casual"
 
 # ---------------- PYDANTIC MODELS ----------------
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=MAX_INPUT_CHARS)
+    session_id: str | None = None
 
 class AvatarRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., min_length=1, max_length=MAX_PROMPT_CHARS)
+    session_id: str | None = None
 
 class OutfitRequest(BaseModel):
-    outfit: str
+    outfit: str = Field(..., min_length=1, max_length=MAX_OUTFIT_CHARS)
+    session_id: str | None = None
 
 class PersonalityRequest(BaseModel):
-    personality: str
+    personality: str = Field(..., min_length=1, max_length=MAX_PERSONALITY_CHARS)
+    session_id: str | None = None
 
 # ---------------- PROMPT BUILDER ----------------
 def build_realistic_prompt(base: str, extra: str = "", background: str = "natural") -> str:
@@ -281,24 +323,34 @@ async def ollama_chat_async(prompt: str) -> str:
     return await loop.run_in_executor(None, _ollama_sync, prompt)
 
 # ---------------- CHAT HISTORY ----------------
-def trim_history():
-    global chat_history
-    if len(chat_history) > MAX_HISTORY:
-        chat_history = chat_history[-MAX_HISTORY:]
+def trim_history(history):
+    if len(history) > MAX_HISTORY:
+        return history[-MAX_HISTORY:]
+    return history
 
-HISTORY_FILE = os.path.join(os.getenv("DATA_DIR", ROOT), "chat_history.json")
 
-def save_chat_history():
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(chat_history, f, indent=2)
+def history_file_for(session_id: str | None = None) -> str:
+    normalized = normalize_session_id(session_id)
+    return os.path.join(HISTORY_DIR, f"{normalized}.json")
 
-def load_chat_history():
-    global chat_history
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r") as f:
-            chat_history = json.load(f)
 
-load_chat_history()
+def save_chat_history(session_id: str | None = None):
+    state = get_session_state(session_id)
+    path = history_file_for(session_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state["chat_history"], f, indent=2)
+
+
+def load_chat_history(session_id: str | None = None):
+    state = get_session_state(session_id)
+    path = history_file_for(session_id)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            state["chat_history"] = json.load(f)
+    return state
+
+
+load_chat_history(DEFAULT_SESSION_ID)
 
 # ---------------- FASTAPI ----------------
 app = FastAPI(title="AI Friend Backend")
@@ -325,11 +377,12 @@ app.mount("/media", StaticFiles(directory=MEDIA_FOLDER), name="media")
 
 @app.get("/health")
 async def health():
+    session = get_session_state(DEFAULT_SESSION_ID)
     return {
         "status":      "ok",
         "llm_model":   MODEL_NAME,
         "sd_device":   device,
-        "personality": personality,
+        "personality": session["personality"],
     }
 
 
@@ -342,11 +395,8 @@ async def get_progress(request_id: str):
 
 @app.post("/chat")
 async def chat(data: ChatRequest):
-    global chat_history, avatar_prompt, personality, outfit
-
-    user_message = data.message.strip()
-    if not user_message:
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    session = get_session_state(data.session_id)
+    user_message = validate_not_blank(data.message, "Message", MAX_INPUT_CHARS)
 
     # Generate unique request ID for progress tracking
     request_id = str(uuid.uuid4())
@@ -367,11 +417,13 @@ async def chat(data: ChatRequest):
         (gif_keyword_map[kw] for kw in gif_keyword_map if kw in user_message.lower()),
         None
     )
+    avatar_prompt = session["avatar_prompt"]
+    outfit = session["outfit"]
     if matched_motion:
         if not avatar_prompt:
             return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "gif": None}
         try:
-            prompt   = build_realistic_prompt(avatar_prompt, f"{matched_motion} in {outfit.lower()}")
+            prompt = build_realistic_prompt(avatar_prompt, f"{matched_motion} in {outfit.lower()}")
             rel_path = await generate_gif(prompt, request_id)
             return {"reply": "Here's me in action!", "gif": f"{BASE_URL}/{rel_path}", "request_id": request_id}
         except Exception as e:
@@ -383,21 +435,19 @@ async def chat(data: ChatRequest):
     if any(kw in user_message.lower() for kw in image_keywords):
         if not avatar_prompt:
             return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "image": None}
-        # Clean up user prompt for more natural results
         user_context = user_message.lower()
         for kw in image_keywords:
             user_context = user_context.replace(kw, "").strip()
         extra = f"in {outfit.lower()}, {user_context}" if user_context else f"in {outfit.lower()}"
-        prompt   = build_realistic_prompt(avatar_prompt, extra)
+        prompt = build_realistic_prompt(avatar_prompt, extra)
         rel_path = await generate_image(prompt, request_id)
         return {"reply": "Here you go!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
 
-    # Text chat
-    chat_history.append(f"User: {user_message}")
-    trim_history()
+    session["chat_history"].append(f"User: {user_message}")
+    session["chat_history"] = trim_history(session["chat_history"])
 
     sys_prompt = (
-        f"YOU are the AI companion — your own appearance is: {avatar_prompt}. Your outfit: {outfit}. Your personality: {personality}.\n"
+        f"YOU are the AI companion — your own appearance is: {avatar_prompt}. Your outfit: {outfit}. Your personality: {session['personality']}.\n"
         f"The USER is the person you are chatting with — they are a separate person, not you.\n"
         f"Rules:\n"
         f"- You are a real human, never mention being an AI\n"
@@ -406,29 +456,28 @@ async def chat(data: ChatRequest):
         f"- Be proactive: ask the user questions, share your own thoughts unprompted\n"
         f"- Tease, joke, get excited or upset naturally\n"
         f"- Text like a real person — short casual messages, no bullet points\n"
-        f"Chat so far:\n{chr(10).join(chat_history[-6:])}\n"
+        f"Chat so far:\n{chr(10).join(session['chat_history'][-6:])}\n"
         f"Reply as yourself. One message, stay in character."
     )
 
     reply = await ollama_chat_async(sys_prompt)
-    chat_history.append(f"Assistant: {reply}")
-    trim_history()
-    save_chat_history()
+    session["chat_history"].append(f"Assistant: {reply}")
+    session["chat_history"] = trim_history(session["chat_history"])
+    save_chat_history(data.session_id)
 
     return {"reply": reply}
 
 
 @app.post("/setavatar")
 async def set_avatar(data: AvatarRequest):
-    global avatar_prompt
-    avatar_prompt = data.prompt.strip()
-    if not avatar_prompt:
-        raise HTTPException(status_code=400, detail="Avatar prompt cannot be empty.")
+    session = get_session_state(data.session_id)
+    avatar_value = validate_not_blank(data.prompt, "Avatar prompt", MAX_PROMPT_CHARS)
+    session["avatar_prompt"] = avatar_value
 
     request_id = str(uuid.uuid4())
-    outfit_text = outfit.lower() if outfit else "casual clothes"
-    prompt   = build_realistic_prompt(
-        avatar_prompt,
+    outfit_text = session["outfit"].lower() if session["outfit"] else "casual clothes"
+    prompt = build_realistic_prompt(
+        session["avatar_prompt"],
         f"in {outfit_text}",
         background="avatar"
     )
@@ -439,37 +488,38 @@ async def set_avatar(data: AvatarRequest):
 
 @app.post("/changeoutfit")
 async def change_outfit(data: OutfitRequest):
-    global outfit
-    outfit = data.outfit.strip()
-    if not outfit:
-        raise HTTPException(status_code=400, detail="Outfit cannot be empty.")
+    session = get_session_state(data.session_id)
+    outfit_value = validate_not_blank(data.outfit, "Outfit", MAX_OUTFIT_CHARS)
+    session["outfit"] = outfit_value
 
     request_id = str(uuid.uuid4())
-    prompt   = build_realistic_prompt(avatar_prompt, f"in {outfit.lower()}", background="plain")
+    prompt = build_realistic_prompt(session["avatar_prompt"], f"in {outfit_value.lower()}", background="plain")
     rel_path = await generate_image(prompt, request_id)
-    return {"reply": f"All dressed up in {outfit}!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
+    return {"reply": f"All dressed up in {outfit_value}!", "image": f"{BASE_URL}/{rel_path}", "request_id": request_id}
 
 
 @app.post("/setpersonality")
 async def set_personality(data: PersonalityRequest):
-    global personality
-    personality = data.personality.strip()
-    if not personality:
-        raise HTTPException(status_code=400, detail="Personality cannot be empty.")
-    return {"reply": f"I'll be more {personality} from now on."}
+    session = get_session_state(data.session_id)
+    personality_value = validate_not_blank(data.personality, "Personality", MAX_PERSONALITY_CHARS)
+    session["personality"] = personality_value
+    return {"reply": f"I'll be more {personality_value} from now on."}
+
+
+class ResetRequest(BaseModel):
+    session_id: str | None = None
 
 
 @app.post("/reset")
-async def reset_all():
-    global avatar_prompt, chat_history, personality, outfit
+async def reset_all(data: ResetRequest | None = None):
+    payload = data or ResetRequest()
+    session = get_session_state(payload.session_id)
 
-    # Clear in-memory state
-    avatar_prompt = ""
-    chat_history  = []
-    personality   = "friendly"
-    outfit        = "casual"
+    session["avatar_prompt"] = ""
+    session["chat_history"] = []
+    session["personality"] = "friendly"
+    session["outfit"] = "casual"
 
-    # Delete all generated images and GIFs
     for folder in [IMAGE_FOLDER, GIF_FOLDER]:
         for f in os.listdir(folder):
             fpath = os.path.join(folder, f)
@@ -479,7 +529,6 @@ async def reset_all():
             except Exception as e:
                 print(f"[reset] Could not delete {fpath}: {e}")
 
-    # Delete avatar.png
     avatar_path = os.path.join(MEDIA_FOLDER, "avatar.png")
     if os.path.exists(avatar_path):
         try:
@@ -487,11 +536,11 @@ async def reset_all():
         except Exception as e:
             print(f"[reset] Could not delete avatar.png: {e}")
 
-    # Delete chat history file
-    if os.path.exists(HISTORY_FILE):
+    history_path = history_file_for(payload.session_id)
+    if os.path.exists(history_path):
         try:
-            os.remove(HISTORY_FILE)
+            os.remove(history_path)
         except Exception as e:
-            print(f"[reset] Could not delete chat_history.json: {e}")
+            print(f"[reset] Could not delete chat history: {e}")
 
     return {"reply": "All data cleared — media, avatar and chat history deleted."}

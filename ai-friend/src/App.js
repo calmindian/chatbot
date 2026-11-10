@@ -6,7 +6,18 @@ import {
 
 // ── API ───────────────────────────────────────────────────────────────────────
 const API_BASE = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000';
+const SESSION_STORAGE_KEY = 'ai-friend-session-id';
 const api = axios.create({ baseURL: API_BASE });
+
+const getSessionId = () => {
+  if (typeof window === 'undefined') return 'default';
+  let sessionId = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+  if (!sessionId) {
+    sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  }
+  return sessionId;
+};
 
 // ── ICONS (inline SVG — no extra deps) ───────────────────────────────────────
 const Icon = {
@@ -64,8 +75,6 @@ const Icon = {
 
 // ── STYLES ────────────────────────────────────────────────────────────────────
 const css = `
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
-
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
@@ -725,7 +734,7 @@ export default function App() {
     if (!avatarPrompt.trim()) return showError('Describe your avatar first.');
     setLoadingAvatar(true);
     try {
-      const res = await api.post('/setavatar', { prompt: avatarPrompt });
+      const res = await api.post('/setavatar', { prompt: avatarPrompt, session_id: getSessionId() });
       const imageUrl = res.data.avatar ? res.data.avatar : `${API_BASE}/media/avatar.png`;
       setAvatarSrc(`${imageUrl}?t=${Date.now()}`);
 
@@ -757,7 +766,7 @@ export default function App() {
     if (!outfit.trim()) return showError('Enter an outfit first.');
     setLoadingOutfit(true);
     try {
-      const res = await api.post('/changeoutfit', { outfit });
+      const res = await api.post('/changeoutfit', { outfit, session_id: getSessionId() });
       const imageUrl = res.data.image ? `${res.data.image}?t=${Date.now()}` : null;
       addMessage('ai', res.data.reply, imageUrl);
 
@@ -788,7 +797,7 @@ export default function App() {
     if (!personality.trim()) return showError('Enter a personality.');
     setLoadingPersonality(true);
     try {
-      const res = await api.post('/setpersonality', { personality });
+      const res = await api.post('/setpersonality', { personality, session_id: getSessionId() });
       addMessage('ai', res.data.reply);
       setSidebarOpen(false);
     } catch { showError('Failed to set personality.'); }
@@ -800,7 +809,7 @@ export default function App() {
     if (!window.confirm('Delete all media, avatar and chat history? This cannot be undone.')) return;
     setLoadingReset(true);
     try {
-      await api.post('/reset');
+      await api.post('/reset', { session_id: getSessionId() });
       setMessages([]);
       setAvatarPrompt('');
       setOutfit('');
@@ -826,7 +835,7 @@ export default function App() {
     else              setIsTyping(true);
 
     try {
-      const res = await api.post('/chat', { message: text });
+      const res = await api.post('/chat', { message: text, session_id: getSessionId() });
       setIsTyping(false);
       setIsGenImg(false);
       setIsGenGif(false);
