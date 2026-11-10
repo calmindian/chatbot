@@ -10,14 +10,35 @@ echo.
 
 :: ── Check Ollama is running ───────────────────────────────────
 echo Checking Ollama service...
-tasklist /fi "imagename eq ollama.exe" 2>nul | findstr /i "ollama.exe" >nul
-if errorlevel 1 (
-    echo Starting Ollama...
-    start /b ollama serve
-    timeout /t 3 /nobreak >nul
-) else (
+curl -sf http://localhost:11434/ >nul 2>&1
+if not errorlevel 1 (
     echo Ollama already running -- OK.
+    goto :ollama_ready
 )
+
+echo Starting Ollama...
+start /b "" ollama serve >> "%TEMP%\ollama.log" 2>&1
+echo Waiting for Ollama to be ready...
+set /a i=0
+
+:wait_loop
+set /a i+=1
+curl -sf http://localhost:11434/ >nul 2>&1
+if not errorlevel 1 goto :ollama_started
+if %i% geq 15 goto :ollama_failed
+echo   Waiting... (%i%/15)
+timeout /t 2 /nobreak >nul
+goto :wait_loop
+
+:ollama_failed
+echo ERROR: Ollama did not start in time. Check %TEMP%\ollama.log for details.
+pause
+exit /b 1
+
+:ollama_started
+echo Ollama started -- OK.
+
+:ollama_ready
 
 :: ── Activate venv and start FastAPI ──────────────────────────
 echo Starting FastAPI on http://127.0.0.1:8000

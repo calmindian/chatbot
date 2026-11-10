@@ -25,7 +25,7 @@ echo.
 ::  numpy            1.26.4        torch 2.4.x requires <2.0
 ::  pillow           10.3.0
 ::  imageio          2.33.1
-::  imageio-ffmpeg   0.4.10
+::  imageio-ffmpeg   0.4.9
 ::  fastapi          0.111.0
 ::  uvicorn          0.29.0
 ::  pydantic         2.7.1
@@ -151,7 +151,7 @@ pip install diffusers==0.29.2 --quiet
 if errorlevel 1 ( echo ERROR: diffusers failed. & pause & exit /b 1 )
 
 echo   [7g] imageio (used by PIL GIF assembly)...
-pip install imageio imageio-ffmpeg --quiet
+pip install imageio==2.33.1 imageio-ffmpeg==0.4.9 --quiet
 if errorlevel 1 ( echo ERROR: imageio failed. & pause & exit /b 1 )
 
 echo   ML dependencies installed.
@@ -164,7 +164,7 @@ echo [Step 8] Installing API dependencies...
 pip install ^
     pydantic==2.7.1 ^
     fastapi==0.111.0 ^
-    uvicorn==0.29.0 ^
+    "uvicorn[standard]==0.29.0" ^
     requests==2.31.0 ^
     python-dotenv==1.0.1 ^
     --quiet
@@ -193,10 +193,10 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 echo   Ollama executable found.
-ollama list >nul 2>&1
+curl -sf http://localhost:11434/ >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Ollama service is not running.
-    echo Start Ollama from the Start Menu or run 'ollama serve' in another terminal.
+    echo Start it with: ollama serve   -- in a separate terminal, or from the Start Menu.
     pause & exit /b 1
 )
 ollama list | findstr /i /c:"%OLLAMA_MODEL%" >nul
@@ -212,7 +212,7 @@ python -c "import requests; r=requests.post('http://localhost:11434/api/generate
 if errorlevel 1 ( echo ERROR: Ollama API test failed. & pause & exit /b 1 )
 
 :: ─────────────────────────────────────────────
-:: Step 11 -- Realistic Vision SD model (~2 GB)
+:: Step 11 -- DreamShaper SD model (~2 GB)
 :: ─────────────────────────────────────────────
 echo.
 echo [Step 11] Checking DreamShaper model...
@@ -255,6 +255,7 @@ echo [Step 13] AnimateDiff not used -- GIFs use SD pipeline directly. Skipping.
 :: ─────────────────────────────────────────────
 echo.
 echo [Step 14] Writing backend\.env...
+if not exist backend mkdir backend
 (
     echo BASE_URL=http://127.0.0.1:8000
     echo OLLAMA_URL=http://localhost:11434/api/generate
@@ -271,7 +272,8 @@ type backend\.env
 echo.
 echo [Step 15] Creating ai-friend\.env...
 if not exist "ai-friend\.env" (
-    echo REACT_APP_API_URL=http://127.0.0.1:8000 > ai-friend\.env
+    if not exist ai-friend mkdir ai-friend
+    >"ai-friend\.env" echo REACT_APP_API_URL=http://127.0.0.1:8000
     echo ai-friend\.env created.
 ) else (
     echo ai-friend\.env already exists -- skipping.
@@ -288,12 +290,14 @@ if errorlevel 1 (
     echo Install Node.js 18+ from https://nodejs.org then run:
     echo   cd ai-friend ^&^& npm install ^&^& npm install @mui/icons-material
 ) else (
-    cd ai-friend
+    pushd ai-friend
     echo   Running npm install...
-    npm install --silent
+    call npm install --silent
+    if errorlevel 1 ( popd & echo ERROR: npm install failed. & pause & exit /b 1 )
     echo   Installing MUI icons...
-    npm install @mui/icons-material --silent
-    cd ..
+    call npm install @mui/icons-material --silent
+    if errorlevel 1 ( popd & echo ERROR: MUI icons install failed. & pause & exit /b 1 )
+    popd
     echo   React dependencies installed.
 )
 

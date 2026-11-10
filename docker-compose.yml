@@ -1,0 +1,66 @@
+# AI Friend -- run everything in Docker (Windows: Docker Desktop + WSL2 + NVIDIA driver)
+#
+# First run:
+#   1) docker compose up -d ollama
+#   2) docker compose exec ollama ollama pull mistral:latest
+#   3) docker compose run --rm backend python download_models.py   (skip if ./models already filled)
+#   4) docker compose up -d --build
+#   5) open http://localhost:3000
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai-friend-ollama
+    # No published port on purpose: the backend reaches it at http://ollama:11434
+    # (avoids a clash if Ollama for Windows is also running on 11434).
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: ai-friend-backend
+    depends_on:
+      - ollama
+    ports:
+      - "8000:8000"
+    environment:
+      BASE_URL: http://localhost:8000          # URL the BROWSER uses to reach the backend
+      OLLAMA_URL: http://ollama:11434/api/generate
+      MODEL_NAME: mistral:latest
+      SD_PATH: models/dreamshaper
+      VAE_PATH: models/vae
+      DATA_DIR: /app/data                      # only used if you apply the 1-line server.py change
+    volumes:
+      - ./models:/app/models
+      - ./media:/app/media
+      - ./data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  frontend:
+    build:
+      context: ./ai-friend
+      args:
+        REACT_APP_API_URL: http://localhost:8000   # baked in at build time
+    container_name: ai-friend-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
