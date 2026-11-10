@@ -65,7 +65,13 @@ sd = StableDiffusionPipeline.from_pretrained(SD_PATH, vae=vae, torch_dtype=dtype
 # Chat (Ollama) will be slower due to shared VRAM, but image generation will be much faster.
 sd = sd.to(device)
 # Optimize for quality: use DPMSolver scheduler (better anatomy/details)
-sd.scheduler = DPMSolverMultistepScheduler.from_config(sd.scheduler.config, use_karras_sigmas=True)
+# Realistic Vision ships a DEIS scheduler config, so force DPM++ 2M Karras explicitly.
+sd.scheduler = DPMSolverMultistepScheduler.from_config(
+    sd.scheduler.config,
+    algorithm_type="dpmsolver++",
+    solver_order=2,
+    use_karras_sigmas=True,
+)
 sd.enable_attention_slicing()
 if device == "cuda":
     try:
