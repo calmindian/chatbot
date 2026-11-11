@@ -99,14 +99,13 @@ print(f"SD pipeline loaded on {device.upper()} (optimized for anatomy/hand quali
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
-    "(watermark:1.5), text, logo, signature, website, close-up, portrait, waist-up, "
-    "cropped legs, cropped feet, out of frame, bad anatomy, extra limbs, extra fingers, "
-    "cartoon, anime, blurry"
+    "(watermark:1.5), text, logo, signature, cropped feet, out of frame, bad anatomy, "
+    "extra limbs, extra fingers, cartoon, anime, blurry"
 )
 IDENTITY_NEGATIVE_PROMPT = (
-    "different person, face swap, altered facial features, different face, changed identity"
+    "face swap, different face, changed identity, distorted face, deformed face, malformed eyes"
 )
-REFERENCE_IMAGE_STRENGTH = 0.72
+REFERENCE_IMAGE_STRENGTH = 0.68
 
 # ---------------- PROMPT BUILDER ----------------
 def build_realistic_prompt(
@@ -118,8 +117,9 @@ def build_realistic_prompt(
     """Build a photo-realistic, full-body prompt around the persona description."""
     framing = "full-body, head-to-toe, standing person, vertical photo, centered, distant"
     identity = (
-        "same exact person as the reference image, unchanged identity, identical facial "
-        "structure, eyes, nose, lips, skin tone, hairstyle, body shape and proportions; "
+        "same person as reference, preserve facial identity and natural facial proportions, "
+        "symmetrical face, clearly defined eyes and mouth, same eyes, nose, lips, skin tone, "
+        "hairstyle, body shape and proportions; "
         "change only the requested outfit, pose and background"
         if preserve_identity else ""
     )
