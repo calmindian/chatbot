@@ -26,7 +26,7 @@ services:
   ollama-model-init:
     image: ollama/ollama:latest
     entrypoint: ["/bin/ollama"]
-    command: ["pull", "mistral:latest"]
+    command: ["pull", "gurubot/girl"]
     environment:
       OLLAMA_HOST: http://ollama:11434
     volumes:
@@ -46,6 +46,8 @@ services:
   backend:
     build: ./backend
     container_name: ai-friend-backend
+    env_file:
+      - ./backend/.env
     depends_on:
       ollama-model-init:
         condition: service_completed_successfully
@@ -53,7 +55,7 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_URL: http://ollama:11434/api/generate
-      MODEL_NAME: mistral:latest
+      MODEL_NAME: gurubot/girl
       SD_PATH: models/realistic
       VAE_PATH: models/vae
       DATA_DIR: /app/data

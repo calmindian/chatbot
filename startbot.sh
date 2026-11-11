@@ -39,4 +39,5 @@ echo
 
 # shellcheck disable=SC1091
 source venv/bin/activate
-uvicorn backend.server:app --host 0.0.0.0 --port 8000 --reload
+cd backend
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload

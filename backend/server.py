@@ -1,416 +1,52 @@
 import os
+
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-import uuid
-import requests
-import torch
-import json
-import asyncio
-import shutil
-import threading
-import numpy as np
-from io import BytesIO
-from PIL import Image, ImageOps, UnidentifiedImageError
-from functools import partial
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.staticfiles import StaticFiles
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from diffusers import StableDiffusionPipeline, AutoencoderKL, DPMSolverMultistepScheduler
-from dotenv import load_dotenv
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import JSONResponse
 
-# ─────────────────────────────────────────────────────────────
-# Progress tracking for image/GIF generation
-gen_progress = {}  # {request_id: {"progress": 0-100, "type": "image|gif"}}
-# ─────────────────────────────────────────────────────────────
-
-# ---------------- LOAD ENV ----------------
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
-
-ROOT         = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASE_URL     = os.getenv("BASE_URL",   "http://127.0.0.1:8000")
-OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",") if origin.strip()]
-MODEL_NAME   = os.getenv("MODEL_NAME", "mistral:latest")
-SD_PATH      = os.path.normpath(os.path.join(ROOT, os.getenv("SD_PATH",  "models/dreamshaper")))
-VAE_PATH     = os.path.normpath(os.path.join(ROOT, os.getenv("VAE_PATH", "models/vae")))
-MEDIA_FOLDER = os.path.normpath(os.path.join(ROOT, "media"))
-IMAGE_FOLDER = os.path.normpath(os.path.join(ROOT, "media", "images"))
-GIF_FOLDER   = os.path.normpath(os.path.join(ROOT, "media", "gifs"))
-MAX_HISTORY  = 20
-MAX_INPUT_CHARS = 1000
-MAX_PROMPT_CHARS = 300
-MAX_OUTFIT_CHARS = 120
-MAX_PERSONALITY_CHARS = 80
-MAX_AVATAR_UPLOAD_BYTES = 10 * 1024 * 1024
-MAX_AVATAR_PIXELS = 25_000_000
-LOW_VRAM = torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 6 * 1024**3
-IMAGE_WIDTH = 504 if LOW_VRAM else 576
-IMAGE_HEIGHT = 896 if LOW_VRAM else 1024
-GIF_WIDTH = 360 if LOW_VRAM else 432
-GIF_HEIGHT = 640 if LOW_VRAM else 768
-DATA_DIR = os.path.normpath(os.getenv("DATA_DIR", ROOT))
-HISTORY_DIR = os.path.join(DATA_DIR, "chat_sessions")
-DEFAULT_SESSION_ID = "default"
-state_lock = threading.RLock()
-session_state = {}
-
-os.makedirs(IMAGE_FOLDER, exist_ok=True)
-os.makedirs(GIF_FOLDER,   exist_ok=True)
-os.makedirs(HISTORY_DIR, exist_ok=True)
-
-# ---------------- LOAD MODELS ----------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
-dtype  = torch.float16 if device == "cuda" else torch.float32
-print(f"Device: {device.upper()}  |  dtype: {dtype}")
-
-# ── VAE ───────────────────────────────────────────────────────
-print("Loading VAE...")
-vae_config = os.path.join(VAE_PATH, "config.json")
-if not os.path.exists(vae_config):
-    print(f"VAE not found — downloading stabilityai/sd-vae-ft-mse...")
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse", torch_dtype=dtype)
-    os.makedirs(VAE_PATH, exist_ok=True)
-    vae.save_pretrained(VAE_PATH)
-else:
-    vae = AutoencoderKL.from_pretrained(VAE_PATH, torch_dtype=dtype)
-
-# ── Stable Diffusion ──────────────────────────────────────────
-# Single pipeline used for BOTH still images and GIFs.
-# AnimateDiff was removed — on RTX 3050 (4 GB VRAM) it requires swapping
-# 2 GB of weights CPU<->GPU which adds 20-30s overhead, making GIFs slower
-# than plain SD. GIFs are now generated as 4 SD frames + PIL assembly.
-print("Loading Stable Diffusion pipeline...")
-sd = StableDiffusionPipeline.from_pretrained(SD_PATH, vae=vae, torch_dtype=dtype)
-# Keep SD on GPU full-time for faster image/GIF generation.
-# Chat (Ollama) will be slower due to shared VRAM, but image generation will be much faster.
-sd = sd.to(device)
-# Optimize for quality: use DPMSolver scheduler (better anatomy/details)
-# Realistic Vision ships a DEIS scheduler config, so force DPM++ 2M Karras explicitly.
-sd.scheduler = DPMSolverMultistepScheduler.from_config(
-    sd.scheduler.config,
-    algorithm_type="dpmsolver++",
-    solver_order=2,
-    use_karras_sigmas=True,
+from app import runtime
+from app.api import auth, chat, data, personas, system
+from app.settings import (
+    APP_PASSWORD,
+    APP_SESSION_SECRET,
+    CORS_ORIGINS,
+    DEFAULT_SESSION_ID,
+    MEDIA_FOLDER,
+    SESSION_COOKIE_SECURE,
 )
-sd.enable_attention_slicing()
-sd.enable_vae_slicing()
-if device == "cuda":
-    if LOW_VRAM:
-        print("[SD] Low-VRAM mode enabled for smaller portrait generation")
-        sd.enable_model_cpu_offload()
-    try:
-        sd.enable_xformers_memory_efficient_attention()
-        print("[SD] xFormers enabled for better quality")
-    except Exception:
-        print("[SD] xFormers not available, using standard attention")
-sd.safety_checker = None
-sd_on_gpu = True if device == "cuda" else False
-print(f"SD pipeline loaded on {device.upper()} (optimized for anatomy/hand quality).")
+from app.state import load_chat_history
 
-# ---------------- NEGATIVE PROMPT ----------------
-NEGATIVE_PROMPT = (
-    # NOTE: photo words (DSLR, bokeh, studio lighting, 8k, 85mm, professional photography)
-    # were removed from here -- putting them in the negative prompt pushes the model
-    # AWAY from a photographic look.
-    # look / style we do NOT want
-    "cartoon, anime, illustration, painting, drawing, sketch, digital art, "
-    "cgi, 3d render, semi-realistic, airbrushed, smooth skin, plastic skin, waxy skin, "
-    "oversaturated, over-sharpened, "
-    # eyes
-    "bad eyes, empty eyes, dead eyes, deformed iris, deformed pupils, "
-    "asymmetrical eyes, cross-eyed, lazy eye, uneven eyes, "
-    # phones / selfie artifacts
-    "phone, smartphone, holding phone, selfie stick, mirror selfie, "
-    # framing defects
-    "cropped, cut off, out of frame, partial body, "
-    # face defects
-    "deformed face, disfigured, ugly, poorly drawn face, mutated face, mutation, "
-    "bad teeth, double face, cloned face, "
-    # anatomy defects
-    "extra fingers, missing fingers, extra limbs, missing limbs, "
-    "bad anatomy, bad proportions, deformed body, deformed legs, "
-    "extra arms, extra hands, fused fingers, too many fingers, long neck, "
-    # quality
-    "blurry, out of focus, low quality, low resolution, worst quality, "
-    "jpeg artifacts, watermark, signature, text, logo, username"
-)
-
-# ---------------- GLOBAL STATE ----------------
-def normalize_session_id(session_id: str | None) -> str:
-    raw = (session_id or DEFAULT_SESSION_ID).strip()
-    return raw or DEFAULT_SESSION_ID
-
-
-def get_session_state(session_id: str | None = None):
-    session_key = normalize_session_id(session_id)
-    with state_lock:
-        if session_key not in session_state:
-            session_state[session_key] = {
-                "avatar_prompt": "",
-                "chat_history": [],
-                "personality": "friendly",
-                "outfit": "casual",
-            }
-        return session_state[session_key]
-
-
-def validate_not_blank(value: str, field_name: str, max_len: int):
-    cleaned = (value or "").strip()
-    if not cleaned:
-        raise HTTPException(status_code=400, detail=f"{field_name} cannot be empty.")
-    if len(cleaned) > max_len:
-        raise HTTPException(status_code=400, detail=f"{field_name} must be {max_len} characters or fewer.")
-    return cleaned
-
-
-avatar_prompt: str = ""
-chat_history:  list = []
-personality:   str  = "friendly"
-outfit:        str  = "casual"
-
-# ---------------- PYDANTIC MODELS ----------------
-class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=MAX_INPUT_CHARS)
-    session_id: str | None = None
-
-class AvatarRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=MAX_PROMPT_CHARS)
-    session_id: str | None = None
-
-class OutfitRequest(BaseModel):
-    outfit: str = Field(..., min_length=1, max_length=MAX_OUTFIT_CHARS)
-    session_id: str | None = None
-
-class PersonalityRequest(BaseModel):
-    personality: str = Field(..., min_length=1, max_length=MAX_PERSONALITY_CHARS)
-    session_id: str | None = None
-
-# ---------------- PROMPT BUILDER ----------------
-def build_realistic_prompt(base: str, extra: str = "", background: str = "natural") -> str:
-    """Build a natural image prompt from base description and context, optimized for humans."""
-    # Use quality descriptors that improve human generation
-    suffix = (
-        "RAW photo, candid photograph, natural light, "
-        "detailed skin texture, visible pores, subtle skin imperfections, "
-        "film grain, sharp focus, natural expression, 35mm photo"
-    )
-
-    # Build context based on background type
-    if background == "plain":
-        context = "simple, plain white background, clean background"
-    elif background == "avatar":
-        context = "plain light grey background, soft natural window light"
-    else:
-        context = "in a natural everyday setting, natural environment"
-
-    parts = [p for p in [base, extra, context, suffix] if p]
-    return ", ".join(parts)
-
-# ---------------- STILL IMAGE ----------------
-def _run_sd(prompt: str, request_id: str, steps: int = 30, seed: int = -1, total_frames: int = 1):
-    # Progress callback for diffusers pipeline
-    def callback_on_step_end(pipe, step_idx, timestep, callback_kwargs):
-        # For images: step_idx goes 0 to steps-1
-        # For GIFs: we'll scale appropriately
-        base_progress = (step_idx + 1) / steps
-        # Account for multiple frames in GIF (frames 0-3 will be 0%, then each frame adds ~25%)
-        if total_frames > 1:
-            frame_idx = (step_idx * total_frames) // steps
-            adjusted_progress = frame_idx / total_frames + (base_progress / (steps * total_frames))
-        else:
-            adjusted_progress = base_progress
-        gen_progress[request_id] = {
-            "progress": min(99, int(adjusted_progress * 100)),  # cap at 99%, 100% will be set when done
-            "type": "image" if total_frames == 1 else "gif"
-        }
-        return callback_kwargs
-
-    # DreamShaper: optimized for photorealistic humans, good color & detail
-    # Keep the generation budget modest on low-VRAM GPUs while preserving the 9:16 portrait format.
-    generator = None
-    if seed >= 0:
-        generator = torch.Generator(device=device).manual_seed(seed)
-    try:
-        with torch.inference_mode():
-            result = sd(
-                prompt,
-                negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=max(10, min(steps, 20 if LOW_VRAM else 30)),
-                guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
-                clip_skip=1,  # full text encoder for anatomical accuracy
-                width=IMAGE_WIDTH,
-                height=IMAGE_HEIGHT,  # 9:16 portrait composition for full-body avatar framing
-                generator=generator,
-                callback_on_step_end=callback_on_step_end,
-            ).images[0]
-        return result
-    except RuntimeError as e:
-        if device == "cuda" and "out of memory" in str(e).lower():
-            print(f"[SD] CUDA OOM, retrying on CPU with reduced settings: {e}")
-            sd.to("cpu")
-            torch.cuda.empty_cache()
-            with torch.inference_mode():
-                fallback_generator = None
-                if seed >= 0:
-                    fallback_generator = torch.Generator(device="cpu").manual_seed(seed)
-                result = sd(
-                    prompt,
-                    negative_prompt=NEGATIVE_PROMPT,
-                    num_inference_steps=max(10, min(steps, 14)),
-                    guidance_scale=6.0,
-                    clip_skip=1,
-                    width=504,
-                    height=896,
-                    generator=fallback_generator,
-                    callback_on_step_end=callback_on_step_end,
-                ).images[0]
-            sd.to(device)
-            return result
-        raise
-
-async def generate_image(prompt: str, request_id: str, steps: int = 20 if LOW_VRAM else 30) -> str:
-    loop = asyncio.get_running_loop()
-    img  = await loop.run_in_executor(None, partial(_run_sd, prompt, request_id, steps, -1, 1))
-    gen_progress[request_id] = {"progress": 100, "type": "image"}
-    path = os.path.join(IMAGE_FOLDER, f"{uuid.uuid4()}.png")
-    img.save(path)
-    return os.path.relpath(path, ROOT).replace("\\", "/")
-
-# ---------------- GIF (SD multi-frame) ----------------
-# Why not AnimateDiff: on RTX 3050 (4 GB VRAM) AnimateDiff cannot share VRAM
-# with SD. Pipeline swapping moves ~2 GB of weights CPU<->GPU twice per GIF,
-# adding 20-30s of overhead with no visible quality benefit at this resolution.
-#
-# This approach: generate 4 frames at 20 steps each using the SD pipeline that
-# is already hot on GPU. Total ~20s. Frames use nearby seeds so they share the
-# same general composition and feel like a smooth loop.
-GIF_SEEDS = [42, 43, 44, 45]  # close seeds = similar composition per frame
-
-def _run_gif(prompt: str, request_id: str) -> str:
-    # SD remains on GPU full-time for faster generation
-    frames = []
-    with torch.inference_mode():
-        for frame_idx, seed in enumerate(GIF_SEEDS):
-            generator = torch.Generator(device=device).manual_seed(seed)
-
-            # Progress callback
-            def callback_on_step_end(pipe, step_idx, timestep, callback_kwargs):
-                # Each frame is ~25%, scale by frame and step
-                step_progress = (step_idx + 1) / 25  # GIF uses 25 steps
-                frame_progress = (frame_idx + step_progress) / len(GIF_SEEDS)
-                gen_progress[request_id] = {
-                    "progress": min(99, int(frame_progress * 100)),
-                    "type": "gif"
-                }
-                return callback_kwargs
-
-            img = sd(
-                prompt,
-                negative_prompt=NEGATIVE_PROMPT,
-                num_inference_steps=18 if LOW_VRAM else 25,  # lower for GIF speed on constrained GPUs
-                guidance_scale=6.5,  # 5-7 looks photographic; 8+ gives a plastic/painted look
-                clip_skip=1,  # full text encoder for anatomical accuracy
-                width=GIF_WIDTH,
-                height=GIF_HEIGHT,  # 9:16 portrait aspect ratio for animated avatar clips
-                generator=generator,
-                callback_on_step_end=callback_on_step_end,
-            ).images[0]
-            frames.append(img)
-
-    gen_progress[request_id] = {"progress": 100, "type": "gif"}
-    loop_frames = frames + frames[-2:0:-1]
-    filename = f"{uuid.uuid4()}.gif"
-    out_path = os.path.join(GIF_FOLDER, filename)
-    loop_frames[0].save(
-        out_path,
-        save_all=True,
-        append_images=loop_frames[1:],
-        duration=120,
-        loop=0,
-        optimize=False,
-    )
-    return f"media/gifs/{filename}"
-
-async def generate_gif(prompt: str, request_id: str) -> str:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, partial(_run_gif, prompt, request_id))
-
-# ---------------- OLLAMA ----------------
-def _ollama_sync(prompt: str) -> str:
-    try:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model":  MODEL_NAME,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature":    0.75,  # slightly higher = more natural varied replies
-                    "num_predict":    300,   # chat replies rarely need more than 300 tokens
-                    "num_ctx":        1024,  # 1024 = fastest chat on 4GB VRAM, still enough for context
-                    "top_k":          40,    # higher = better word choices, more accurate
-                    "top_p":          0.9,
-                    "repeat_penalty": 1.15,  # slightly higher = less repetitive
-                }
-            },
-            timeout=120
-        )
-        response.raise_for_status()
-        return response.json().get("response", "").strip()
-    except requests.exceptions.RequestException as e:
-        print(f"[Ollama error] {e}")
-        return "I'm having a little trouble thinking right now — try again in a moment! 💭"
-
-async def ollama_chat_async(prompt: str) -> str:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _ollama_sync, prompt)
-
-# ---------------- CHAT HISTORY ----------------
-def trim_history(history):
-    if len(history) > MAX_HISTORY:
-        return history[-MAX_HISTORY:]
-    return history
-
-
-def build_public_base_url(request=None) -> str:
-    if request is not None:
-        forwarded_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-        forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
-        return f"{forwarded_proto}://{forwarded_host}"
-    return BASE_URL
-
-
-def media_url_for(request, relative_path: str) -> str:
-    return f"{build_public_base_url(request)}/{relative_path.lstrip('/')}"
-
-
-def history_file_for(session_id: str | None = None) -> str:
-    normalized = normalize_session_id(session_id)
-    return os.path.join(HISTORY_DIR, f"{normalized}.json")
-
-
-def save_chat_history(session_id: str | None = None):
-    state = get_session_state(session_id)
-    path = history_file_for(session_id)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state["chat_history"], f, indent=2)
-
-
-def load_chat_history(session_id: str | None = None):
-    state = get_session_state(session_id)
-    path = history_file_for(session_id)
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            state["chat_history"] = json.load(f)
-    return state
-
+if not APP_PASSWORD.isdigit() or len(APP_PASSWORD) != 4:
+    raise RuntimeError("Set APP_PASSWORD to a four-digit PIN.")
+if len(APP_SESSION_SECRET) < 32:
+    raise RuntimeError("Set APP_SESSION_SECRET to a value at least 32 characters long.")
 
 load_chat_history(DEFAULT_SESSION_ID)
 
-# ---------------- FASTAPI ----------------
 app = FastAPI(title="AI Friend Backend")
 
+class AuthenticationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS" or request.url.path in {"/auth/status", "/auth/login"}:
+            return await call_next(request)
+        if request.session.get("authenticated") is True:
+            return await call_next(request)
+        return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+
+
+app.add_middleware(AuthenticationMiddleware)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=APP_SESSION_SECRET,
+    session_cookie="ai_friend_session",
+    same_site="strict",
+    https_only=SESSION_COOKIE_SECURE,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -420,229 +56,36 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+
 @app.middleware("http")
-async def add_no_cache_header(request, call_next):
+async def add_no_cache_header(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path.startswith("/media"):
+    if request.url.path.startswith("/media") or request.url.path == "/conversation":
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"]        = "no-cache"
-        response.headers["Expires"]       = "0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
-app.mount("/media", StaticFiles(directory=MEDIA_FOLDER), name="media")
 
-# ---------------- ROUTES ----------------
+@app.middleware("http")
+async def coordinate_data_deletion(request: Request, call_next):
+    if request.method != "POST" or request.url.path == "/delete-all-data":
+        return await call_next(request)
 
-@app.get("/health")
-async def health():
-    session = get_session_state(DEFAULT_SESSION_ID)
-    return {
-        "status":      "ok",
-        "llm_model":   MODEL_NAME,
-        "sd_device":   device,
-        "personality": session["personality"],
-    }
-
-
-@app.get("/progress/{request_id}")
-async def get_progress(request_id: str):
-    """Get generation progress for image/GIF."""
-    if request_id in gen_progress:
-        return gen_progress[request_id]
-    return {"progress": 0, "type": "unknown"}
-
-@app.post("/chat")
-async def chat(request: Request, data: ChatRequest):
-    session = get_session_state(data.session_id)
-    user_message = validate_not_blank(data.message, "Message", MAX_INPUT_CHARS)
-
-    # Generate unique request ID for progress tracking
-    request_id = str(uuid.uuid4())
-
-    # GIF keywords → map to clean motion word for prompt
-    gif_keyword_map = {
-        "dancing": "dancing", "dance": "dancing",
-        "walking": "walking", "walk":  "walking",
-        "running": "running", "run":   "running",
-        "waving":  "waving",  "wave":  "waving",
-        "moving":  "moving naturally", "motion": "moving naturally",
-        "action":  "dynamic pose",
-        "animate": "moving naturally",
-        "gif":     "moving naturally",
-        "video":   "moving naturally",
-    }
-    matched_motion = next(
-        (gif_keyword_map[kw] for kw in gif_keyword_map if kw in user_message.lower()),
-        None
-    )
-    avatar_prompt = session["avatar_prompt"]
-    outfit = session["outfit"]
-    if matched_motion:
-        if not avatar_prompt:
-            return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "gif": None}
-        try:
-            prompt = build_realistic_prompt(avatar_prompt, f"{matched_motion} in {outfit.lower()}")
-            rel_path = await generate_gif(prompt, request_id)
-            return {"reply": "Here's me in action!", "gif": media_url_for(request, rel_path), "request_id": request_id}
-        except Exception as e:
-            print(f"[GIF error] {e}")
-            return {"reply": "Hmm, something went wrong with that animation. Try again?", "gif": None}
-
-    # Image keywords
-    image_keywords = ["image", "picture", "photo", "pic", "selfie", "show me", "draw"]
-    if any(kw in user_message.lower() for kw in image_keywords):
-        if not avatar_prompt:
-            return {"reply": "I'd love to, but I need an avatar first! Create one in the settings.", "image": None}
-        user_context = user_message.lower()
-        for kw in image_keywords:
-            user_context = user_context.replace(kw, "").strip()
-        extra = f"in {outfit.lower()}, {user_context}" if user_context else f"in {outfit.lower()}"
-        prompt = build_realistic_prompt(avatar_prompt, extra)
-        rel_path = await generate_image(prompt, request_id)
-        return {"reply": "Here you go!", "image": media_url_for(request, rel_path), "request_id": request_id}
-
-    session["chat_history"].append(f"User: {user_message}")
-    session["chat_history"] = trim_history(session["chat_history"])
-
-    sys_prompt = (
-        f"YOU are the AI companion — your own appearance is: {avatar_prompt}. Your outfit: {outfit}. Your personality: {session['personality']}.\n"
-        f"The USER is the person you are chatting with — they are a separate person, not you.\n"
-        f"Rules:\n"
-        f"- You are a real human, never mention being an AI\n"
-        f"- YOUR appearance is {avatar_prompt} — never assign this to the user\n"
-        f"- You have your own emotions, opinions and moods — express them freely\n"
-        f"- Be proactive: ask the user questions, share your own thoughts unprompted\n"
-        f"- Tease, joke, get excited or upset naturally\n"
-        f"- Text like a real person — short casual messages, no bullet points\n"
-        f"Chat so far:\n{chr(10).join(session['chat_history'][-6:])}\n"
-        f"Reply as yourself. One message, stay in character."
-    )
-
-    reply = await ollama_chat_async(sys_prompt)
-    session["chat_history"].append(f"Assistant: {reply}")
-    session["chat_history"] = trim_history(session["chat_history"])
-    save_chat_history(data.session_id)
-
-    return {"reply": reply}
-
-
-@app.post("/setavatar")
-async def set_avatar(request: Request, data: AvatarRequest):
-    session = get_session_state(data.session_id)
-    avatar_value = validate_not_blank(data.prompt, "Avatar prompt", MAX_PROMPT_CHARS)
-    session["avatar_prompt"] = avatar_value
-
-    request_id = str(uuid.uuid4())
-    outfit_text = session["outfit"].lower() if session["outfit"] else "casual clothes"
-    prompt = build_realistic_prompt(
-        session["avatar_prompt"],
-        f"in {outfit_text}",
-        background="avatar"
-    )
-    rel_path = await generate_image(prompt, request_id, steps=20 if LOW_VRAM else 30)
-    shutil.copy(os.path.join(ROOT, rel_path), os.path.join(MEDIA_FOLDER, "avatar.png"))
-    return {"avatar": media_url_for(request, "media/avatar.png"), "request_id": request_id}
-
-
-@app.post("/uploadavatar")
-async def upload_avatar(
-    request: Request,
-    file: UploadFile = File(...),
-    session_id: str = Form(...),
-):
-    content = await file.read(MAX_AVATAR_UPLOAD_BYTES + 1)
-    await file.close()
-    if not content:
-        raise HTTPException(status_code=400, detail="Choose an image to upload.")
-    if len(content) > MAX_AVATAR_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller.")
-
+    async with runtime.data_mutation_condition:
+        await runtime.data_mutation_condition.wait_for(lambda: not runtime.deleting_all_data)
+        runtime.active_mutation_requests += 1
     try:
-        with Image.open(BytesIO(content)) as image:
-            if image.format not in {"JPEG", "PNG", "WEBP"}:
-                raise HTTPException(status_code=400, detail="Upload a JPEG, PNG, or WebP image.")
-            if image.width * image.height > MAX_AVATAR_PIXELS:
-                raise HTTPException(status_code=400, detail="Image dimensions are too large.")
-            image.verify()
-
-        with Image.open(BytesIO(content)) as image:
-            avatar = ImageOps.exif_transpose(image).convert("RGB")
-            output = BytesIO()
-            avatar.save(output, format="PNG", optimize=True)
-    except HTTPException:
-        raise
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
-        raise HTTPException(status_code=400, detail="The uploaded file is not a valid supported image.") from exc
-
-    avatar_path = os.path.join(MEDIA_FOLDER, "avatar.png")
-    temporary_path = f"{avatar_path}.{uuid.uuid4()}.tmp"
-    try:
-        with open(temporary_path, "wb") as avatar_file:
-            avatar_file.write(output.getvalue())
-        os.replace(temporary_path, avatar_path)
+        return await call_next(request)
     finally:
-        if os.path.exists(temporary_path):
-            os.remove(temporary_path)
-
-    get_session_state(session_id)
-    return {"avatar": media_url_for(request, "media/avatar.png")}
+        async with runtime.data_mutation_condition:
+            runtime.active_mutation_requests -= 1
+            runtime.data_mutation_condition.notify_all()
 
 
-@app.post("/changeoutfit")
-async def change_outfit(request: Request, data: OutfitRequest):
-    session = get_session_state(data.session_id)
-    outfit_value = validate_not_blank(data.outfit, "Outfit", MAX_OUTFIT_CHARS)
-    session["outfit"] = outfit_value
-
-    request_id = str(uuid.uuid4())
-    prompt = build_realistic_prompt(session["avatar_prompt"], f"in {outfit_value.lower()}", background="plain")
-    rel_path = await generate_image(prompt, request_id)
-    return {"reply": f"All dressed up in {outfit_value}!", "image": media_url_for(request, rel_path), "request_id": request_id}
-
-
-@app.post("/setpersonality")
-async def set_personality(data: PersonalityRequest):
-    session = get_session_state(data.session_id)
-    personality_value = validate_not_blank(data.personality, "Personality", MAX_PERSONALITY_CHARS)
-    session["personality"] = personality_value
-    return {"reply": f"I'll be more {personality_value} from now on."}
-
-
-class ResetRequest(BaseModel):
-    session_id: str | None = None
-
-
-@app.post("/reset")
-async def reset_all(data: ResetRequest | None = None):
-    payload = data or ResetRequest()
-    session = get_session_state(payload.session_id)
-
-    session["avatar_prompt"] = ""
-    session["chat_history"] = []
-    session["personality"] = "friendly"
-    session["outfit"] = "casual"
-
-    for folder in [IMAGE_FOLDER, GIF_FOLDER]:
-        for f in os.listdir(folder):
-            fpath = os.path.join(folder, f)
-            try:
-                if os.path.isfile(fpath):
-                    os.remove(fpath)
-            except Exception as e:
-                print(f"[reset] Could not delete {fpath}: {e}")
-
-    avatar_path = os.path.join(MEDIA_FOLDER, "avatar.png")
-    if os.path.exists(avatar_path):
-        try:
-            os.remove(avatar_path)
-        except Exception as e:
-            print(f"[reset] Could not delete avatar.png: {e}")
-
-    history_path = history_file_for(payload.session_id)
-    if os.path.exists(history_path):
-        try:
-            os.remove(history_path)
-        except Exception as e:
-            print(f"[reset] Could not delete chat history: {e}")
-
-    return {"reply": "All data cleared — media, avatar and chat history deleted."}
+app.mount("/media", StaticFiles(directory=MEDIA_FOLDER), name="media")
+app.include_router(auth.router)
+app.include_router(system.router)
+app.include_router(chat.router)
+app.include_router(personas.router)
+app.include_router(data.router)

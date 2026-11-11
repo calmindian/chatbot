@@ -1,0 +1,74 @@
+.auth-gate,
+.auth-loading {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(ellipse at 50% 35%, rgba(0, 237, 255, .09), transparent 52%),
+    #080b12;
+  color: #f1f5ff;
+}
+
+.auth-card {
+  width: min(100%, 420px);
+  display: grid;
+  gap: 18px;
+  padding: 34px;
+  border: 1px solid rgba(0, 237, 255, .24);
+  border-radius: 22px;
+  background: rgba(15, 20, 32, .94);
+  box-shadow: 0 0 48px rgba(0, 210, 255, .12);
+}
+
+.auth-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 15px;
+  color: #071014;
+  background: #00e5ff;
+  font-size: 25px;
+}
+
+.auth-eyebrow {
+  margin-bottom: -14px;
+  color: #00e5ff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .14em;
+}
+
+.auth-card h1 {
+  font-size: clamp(26px, 7vw, 34px);
+}
+
+.auth-description {
+  margin-top: -12px;
+  color: #aab4c8;
+}
+
+.auth-card .MuiOutlinedInput-root {
+  color: #f1f5ff;
+  background: #101725;
+}
+
+.auth-card .MuiInputLabel-root {
+  color: #aab4c8;
+}
+
+.auth-card .MuiOutlinedInput-notchedOutline {
+  border-color: #3a465b;
+}
+
+.auth-card .MuiButton-root {
+  min-height: 48px;
+  color: #071014;
+  background: #00e5ff;
+  font-weight: 700;
+}
+
+.auth-card .MuiButton-root:hover {
+  background: #56efff;
+}

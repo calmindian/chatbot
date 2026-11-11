@@ -45,6 +45,7 @@ echo Starting FastAPI on http://127.0.0.1:8000
 echo Press Ctrl+C to stop.
 echo.
 call venv\Scripts\activate
-uvicorn backend.server:app --host 0.0.0.0 --port 8000 --reload
+cd backend
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 
 endlocal
