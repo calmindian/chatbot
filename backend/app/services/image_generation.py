@@ -1,8 +1,8 @@
 """Stable Diffusion initialization and image/GIF generation."""
 
 import asyncio
-import hashlib
 import os
+import secrets
 import threading
 import uuid
 from functools import partial
@@ -20,8 +20,6 @@ from app.settings import (
     GIF_FOLDER, GIF_HEIGHT, GIF_WIDTH, IMAGE_FOLDER, IMAGE_HEIGHT,
     IMAGE_WIDTH, ROOT, SD_PATH, VAE_PATH,
 )
-from app.state import normalize_session_id
-
 LOW_VRAM = torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 6 * 1024**3
 sd_generation_lock = threading.Lock()
 gen_progress: dict[str, dict[str, int | str]] = {}
@@ -99,13 +97,14 @@ print(f"SD pipeline loaded on {device.upper()} (optimized for anatomy/hand quali
 
 # ---------------- NEGATIVE PROMPT ----------------
 NEGATIVE_PROMPT = (
-    "(watermark:1.5), text, logo, signature, cropped feet, out of frame, bad anatomy, "
-    "extra limbs, extra fingers, cartoon, anime, blurry"
+    "(watermark:1.5), text, logo, signature, dark, underexposed, gloomy, night, "
+    "bad anatomy, extra limbs, extra fingers, cartoon, anime, blurry"
 )
 IDENTITY_NEGATIVE_PROMPT = (
-    "face swap, different face, changed identity, distorted face, deformed face, malformed eyes"
+    "face swap, different person, changed identity, distorted face, deformed face, malformed eyes"
 )
-REFERENCE_IMAGE_STRENGTH = 0.68
+REFERENCE_IMAGE_STRENGTH = 0.82
+GIF_REFERENCE_IMAGE_STRENGTH = 0.72
 
 # ---------------- PROMPT BUILDER ----------------
 def build_realistic_prompt(
@@ -114,38 +113,34 @@ def build_realistic_prompt(
     background: str = "natural",
     preserve_identity: bool = False,
 ) -> str:
-    """Build a photo-realistic, full-body prompt around the persona description."""
-    framing = "full-body, head-to-toe, standing person, vertical photo, centered, distant"
+    """Build a natural-light photo prompt without locking the source composition."""
+    framing = "photorealistic candid portrait, natural pose, comfortably framed subject"
     identity = (
-        "same person as reference, preserve facial identity and natural facial proportions, "
-        "symmetrical face, clearly defined eyes and mouth, same eyes, nose, lips, skin tone, "
-        "hairstyle, body shape and proportions; "
-        "change only the requested outfit, pose and background"
+        "same person's face and body proportions as reference; preserve facial features, "
+        "skin tone, hairstyle and natural build; vary pose, outfit, lighting and background "
+        "instead of copying reference composition"
         if preserve_identity else ""
     )
 
-    # Build context based on background type
     if background == "plain":
-        context = "simple, plain white background, clean background"
+        context = "clean white background, soft natural daylight, balanced exposure"
     elif background == "avatar":
-        context = "plain light grey background, soft natural window light"
+        context = "simple light background, soft natural daylight, balanced exposure"
     else:
-        context = "in a natural everyday setting, natural environment"
+        context = "bright everyday setting, soft natural daylight, balanced exposure, realistic colors"
 
     remaining_base = base
     remaining_extra = extra
     remaining_context = context
-    quality = "photorealistic"
+    quality = ""
     parts = [framing, identity, remaining_base, remaining_extra, remaining_context, quality]
     parts = [part for part in parts if part]
     prompt = ", ".join(parts)
     while len(sd.tokenizer(prompt, truncation=False)["input_ids"]) > sd.tokenizer.model_max_length:
-        if remaining_extra:
-            remaining_extra = remaining_extra[:-8].rsplit(" ", 1)[0].strip()
-        elif remaining_context:
+        if remaining_context:
             remaining_context = ""
-        elif quality:
-            quality = ""
+        elif remaining_extra:
+            remaining_extra = remaining_extra[:-8].rsplit(" ", 1)[0].strip()
         elif len(remaining_base) > 32:
             remaining_base = remaining_base[:-8].rsplit(" ", 1)[0].strip()
         else:
@@ -164,11 +159,6 @@ def build_realistic_prompt(
     return prompt
 
 # ---------------- STILL IMAGE ----------------
-def identity_seed(session_id: str | None) -> int:
-    digest = hashlib.sha256(normalize_session_id(session_id).encode("utf-8")).digest()
-    return int.from_bytes(digest[:4], "big")
-
-
 def _run_sd(
     prompt: str,
     request_id: str,
@@ -267,7 +257,7 @@ async def generate_image(
             prompt,
             request_id,
             32,
-            identity_seed(session_id),
+            secrets.randbits(32),
             1,
             reference_image_path,
         ),
@@ -337,7 +327,7 @@ def _run_gif_locked(
             if reference_image is not None:
                 img = sd_img2img(
                     image=reference_image,
-                    strength=REFERENCE_IMAGE_STRENGTH,
+                    strength=GIF_REFERENCE_IMAGE_STRENGTH,
                     **inference_args,
                 ).images[0]
             else:
@@ -367,5 +357,5 @@ async def generate_gif(
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        partial(_run_gif, prompt, request_id, identity_seed(session_id), reference_image_path),
+        partial(_run_gif, prompt, request_id, secrets.randbits(32), reference_image_path),
     )

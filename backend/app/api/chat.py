@@ -108,7 +108,7 @@ async def process_chat(request: Request, data: ChatRequest):
         user_context = image_prompt_from_chat(user_message)
         prompt = build_realistic_prompt(
             "",
-            extra=f"{user_context}, wearing the specifically requested clothing, replacing the reference outfit",
+            extra=user_context,
             preserve_identity=True,
         )
         try:
